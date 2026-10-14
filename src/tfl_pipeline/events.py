@@ -40,5 +40,8 @@ def wrap_records(
 
 
 def lake_partition(ingested_at: datetime) -> str:
-    """Return a partition key for the lake, e.g. dt=2023-01-01/hour=12. This is used to partition the data in S3."""
+    """Hive-style partition path for an ISO timestamp, e.g. 'dt=2026-10-14/hour=15'.
+
+    Partitioning by ingestion time means a delayed flush still lands each event in the right hour.
+    """
     return f"dt={ingested_at[:10]}/hour={ingested_at[11:13]}"
