@@ -37,3 +37,8 @@ def wrap_records(
         )
         key = str(record.get(key_field, ""))
         yield key, json.dumps(event, separators=(",", ":")).encode("utf-8")
+
+
+def lake_partition(ingested_at: datetime) -> str:
+    """Return a partition key for the lake, e.g. dt=2023-01-01/hour=12. This is used to partition the data in S3."""
+    return f"dt={ingested_at[:10]}/hour={ingested_at[11:13]}"
