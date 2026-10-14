@@ -27,7 +27,9 @@ class Settings:
             tfl_app_key=os.environ.get("TFL_APP_KEY") or None,
             tfl_modes=tuple(m.strip() for m in modes.split(",") if m.strip()),
             poll_interval_seconds=int(os.environ.get("POLL_INTERVAL_SECONDS", "60")),
-            kafka_bootstrap_servers=os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
+            kafka_bootstrap_servers=os.environ.get(
+                "KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"
+            ),
             lake_uri=os.environ.get("LAKE_URI", "./data/lake"),
             flush_max_records=int(os.environ.get("FLUSH_MAX_RECORDS", "50000")),
             flush_max_seconds=int(os.environ.get("FLUSH_MAX_SECONDS", "300")),

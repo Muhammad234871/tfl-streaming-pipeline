@@ -42,10 +42,7 @@ class TflClient:
     def arrivals(self, mode: str) -> list[dict]:
         """Get arrival information for a specific mode."""
         return self._get(f"/Mode/{mode}/Arrivals", {"count": -1})
-    
-    
+
     def line_status(self, modes: tuple[str, ...]) -> list[dict]:
         """Get the current status of every line in the given modes."""
         return self._get(f"/Line/Mode/{','.join(modes)}/Status")
-    
-    
