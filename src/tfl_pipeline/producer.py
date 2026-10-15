@@ -6,6 +6,7 @@ Usage:
 """
 
 import logging
+import signal
 import time
 import uuid
 from datetime import UTC, datetime
@@ -78,20 +79,31 @@ def poll_once(client: TflClient, settings: Settings) -> list[tuple[str, str, byt
 
 
 def run(settings: Settings) -> None:
-    """Poll TfL forever and publish to Kafka until stopped."""
+    """Poll TfL forever and publish to Kafka until stopped with Ctrl+C or SIGTERM."""
     ensure_topics(settings.kafka_bootstrap_servers)
     producer = Producer(
         {
-            "bootstrap.servers": settings.kafka_bootstrap_servers,  # to understand where kafka is running
-            "acks": "all",  # the broker must store a message before it is considered sent
-            "enable.idempotence": True,  # retries will not result in duplicates
-            "compression.type": "lz4",  # smaller network traffic and disk usage, lz4 is fast and has good compression ratio
-            "linger.ms": 50,  # wait up to 50ms before sending a batch of messages, to increase throughput
+            "bootstrap.servers": settings.kafka_bootstrap_servers,
+            "acks": "all",  # safest: broker must store the message before it counts as sent
+            "enable.idempotence": True,  # retries never create duplicates
+            "compression.type": "lz4",  # fast compression, less network and disk usage
+            "linger.ms": 50,  # wait up to 50ms to batch messages (higher throughput)
         }
     )
     client = TflClient(settings.tfl_app_key)
 
-    while True:
+    stopping = False
+
+    def stop(*_):
+        nonlocal stopping
+        stopping = True
+        log.info("shutting down...")
+
+    signal.signal(signal.SIGINT, stop)  # Ctrl+C
+    signal.signal(signal.SIGTERM, stop)  # docker stop
+
+    while not stopping:
+        started = time.monotonic()
         messages = poll_once(client, settings)
         for topic, key, value in messages:
             producer.produce(topic, key=key, value=value)
@@ -99,9 +111,18 @@ def run(settings: Settings) -> None:
         producer.flush(30)  # block until every message is delivered (max 30s)
         log.info("published %d messages", len(messages))
 
-        time.sleep(settings.poll_interval_seconds)
+        # Nap in short steps so a stop request is noticed within half a second.
+        while (
+            not stopping and time.monotonic() - started < settings.poll_interval_seconds
+        ):
+            time.sleep(0.5)
+
+    producer.flush(30)  # send anything still queued before exiting
+    log.info("stopped")
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     run(Settings.from_env())
