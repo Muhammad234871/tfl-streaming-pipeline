@@ -6,9 +6,11 @@ Usage:
 """
 
 import logging
+import time
 import uuid
 from datetime import UTC, datetime
 
+from confluent_kafka import Producer
 from confluent_kafka.admin import AdminClient, NewTopic
 
 from .config import TOPIC_ARRIVALS, TOPIC_LINE_STATUS, Settings
@@ -74,3 +76,32 @@ def poll_once(client: TflClient, settings: Settings) -> list[tuple[str, str, byt
 
     return messages
 
+
+def run(settings: Settings) -> None:
+    """Poll TfL forever and publish to Kafka until stopped."""
+    ensure_topics(settings.kafka_bootstrap_servers)
+    producer = Producer(
+        {
+            "bootstrap.servers": settings.kafka_bootstrap_servers,  # to understand where kafka is running
+            "acks": "all",  # the broker must store a message before it is considered sent
+            "enable.idempotence": True,  # retries will not result in duplicates
+            "compression.type": "lz4",  # smaller network traffic and disk usage, lz4 is fast and has good compression ratio
+            "linger.ms": 50,  # wait up to 50ms before sending a batch of messages, to increase throughput
+        }
+    )
+    client = TflClient(settings.tfl_app_key)
+
+    while True:
+        messages = poll_once(client, settings)
+        for topic, key, value in messages:
+            producer.produce(topic, key=key, value=value)
+
+        producer.flush(30)  # block until every message is delivered (max 30s)
+        log.info("published %d messages", len(messages))
+
+        time.sleep(settings.poll_interval_seconds)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    run(Settings.from_env())
