@@ -8,6 +8,12 @@ TFL_BASE_URL = "https://api.tfl.gov.uk"
 TOPIC_ARRIVALS = "tfl.arrivals.raw"
 TOPIC_LINE_STATUS = "tfl.line-status.raw"
 
+# Kafka topic -> dataset name used as the folder in the data lake.
+TOPIC_DATASETS = {
+    TOPIC_ARRIVALS: "arrivals",
+    TOPIC_LINE_STATUS: "line_status",
+}
+
 
 @dataclass(frozen=True)
 class Settings:
