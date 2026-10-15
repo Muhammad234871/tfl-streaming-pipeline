@@ -1,11 +1,11 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from tfl_pipeline.events import lake_partition, to_iso, wrap_records
 
 
 def test_to_iso_formats_utc_datetime():
-    ts = datetime(2026, 10, 14, 15, 11, 54, tzinfo=timezone.utc)
+    ts = datetime(2026, 10, 14, 15, 11, 54, tzinfo=UTC)
     assert to_iso(ts) == "2026-10-14T15:11:54Z"
 
 
@@ -14,7 +14,7 @@ def test_lake_partition_uses_date_and_hour():
     assert lake_partition("2026-10-14T15:11:54Z") == "dt=2026-10-14/hour=15"
 
 
-INGESTED_AT = datetime(2026, 10, 14, 15, 11, 54, tzinfo=timezone.utc)
+INGESTED_AT = datetime(2026, 10, 14, 15, 11, 54, tzinfo=UTC)
 
 
 def test_wrap_records_builds_key_and_envelope():
