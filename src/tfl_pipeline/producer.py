@@ -121,7 +121,7 @@ def run(settings: Settings) -> None:
                     )
                     break  # queued OK, go to the next message
                 except BufferError:  # local queue is full
-                    log.warning("producer queue full, waiting for it to drain") 
+                    log.warning("producer queue full, waiting for it to drain")
                     producer.poll(1)  # wait up to 1s; deliveries free space
                     if stopping:
                         break
