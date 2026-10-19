@@ -27,3 +27,26 @@ jobs:
 
       - name: Run tests
         run: pytest -v
+  terraform:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.6
+
+      - name: Check formatting (terraform fmt)
+        run: terraform fmt -check -recursive
+
+      - name: Init (no backend, no AWS access)
+        run: terraform init -backend=false
+
+      - name: Validate
+        run: terraform validate
+
