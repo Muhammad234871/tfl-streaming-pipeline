@@ -6,7 +6,7 @@ from datetime import datetime
 
 
 def to_iso(ts: datetime) -> str:
-    """an ISO 8601 string and ‘Z’ suffix”. Say “with a ‘Z’ (UTC) suffix, e.g. 2023-01-01T12:00:00Z."""
+    """Format a UTC datetime as an ISO 8601 string with a 'Z' suffix, e.g. 2026-10-14T15:11:54Z."""
     return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -39,7 +39,7 @@ def wrap_records(
         yield key, json.dumps(event, separators=(",", ":")).encode("utf-8")
 
 
-def lake_partition(ingested_at: datetime) -> str:
+def lake_partition(ingested_at: str) -> str:
     """Hive-style partition path for an ISO timestamp, e.g. 'dt=2026-10-14/hour=15'.
 
     Partitioning by ingestion time means a delayed flush still lands each event in the right hour.

@@ -22,7 +22,7 @@ log = logging.getLogger("producer")
 
 
 def ensure_topics(bootstrap_servers: str) -> None:
-    """Create the Kafka topics if they do not exist yet. Safe to call on every start."""
+    """Create the Kafka topics if they do not exist yet. Call on every start."""
     admin = AdminClient({"bootstrap.servers": bootstrap_servers})
     existing = admin.list_topics(timeout=10).topics
 
@@ -92,6 +92,14 @@ def run(settings: Settings) -> None:
     )
     client = TflClient(settings.tfl_app_key)
 
+    failed = 0
+
+    def on_delivery(err, msg):
+        nonlocal failed
+        if err is not None:
+            failed += 1
+            log.error("delivery failed for %s: %s", msg.topic(), err)
+
     stopping = False
 
     def stop(*_):
@@ -106,10 +114,25 @@ def run(settings: Settings) -> None:
         started = time.monotonic()
         messages = poll_once(client, settings)
         for topic, key, value in messages:
-            producer.produce(topic, key=key, value=value)
+            while True:  # never drop a message: retry until it's queued
+                try:
+                    producer.produce(
+                        topic, key=key, value=value, on_delivery=on_delivery
+                    )
+                    break  # queued OK, go to the next message
+                except BufferError:  # local queue is full
+                    log.warning("producer queue full, waiting for it to drain")  # NEW
+                    producer.poll(1)  # wait up to 1s; deliveries free space
+                    if stopping:
+                        break
+            producer.poll(0)
 
-        producer.flush(30)  # block until every message is delivered (max 30s)
-        log.info("published %d messages", len(messages))
+        undelivered = producer.flush(
+            30
+        )  # block until every message is delivered (max 30s)
+        if undelivered:
+            log.warning("%d messages still undelivered after flush", undelivered)
+        log.info("published %d messages, %d failed deliveries", len(messages), failed)
 
         # Nap in short steps so a stop request is noticed within half a second.
         while (
