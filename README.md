@@ -30,7 +30,7 @@ flowchart LR
 | **Kafka** (`docker-compose.yml`) | Single-node broker in KRaft mode (no ZooKeeper), 3 partitions per topic, 72-hour retention, plus Kafka UI |
 | **Consumer** (`consumer.py`) | Reads both topics, buffers messages, and writes gzipped JSON Lines files partitioned by ingestion hour |
 | **Sinks** (`sinks.py`) | Write files to the lake: an S3 bucket or a local folder, chosen by one setting (`LAKE_URI`) without changing the consumer |
-| **Infrastructure** (`infra/`) | Terraform for the S3 bucket: private, tagged, with a lifecycle rule that expires raw bronze files after 30 days |
+| **Infrastructure** (`infra/`) | Terraform for the S3 bucket (private, tagged, raw bronze files expire after 30 days) and a least-privilege IAM role for the consumer |
 
 Lake layout:
 ```
@@ -59,8 +59,12 @@ s3://<bucket>/bronze/line_status/dt=2026-10-19/hour=12/part-20261019T124124Z-50f
 - **Infrastructure as code.** The bucket is created by Terraform, never by hand: public access
   is blocked, every resource is tagged, and a lifecycle rule deletes raw bronze files after
   30 days to control storage costs (silver and gold are kept).
+- **Least privilege.** The consumer runs as an IAM role whose only permission is
+  `s3:PutObject` under `bronze/` in the lake bucket. Verified by assuming the role: writes to
+  `bronze/` succeed, while writes to `silver/`, listing the bucket and deleting objects are denied.
 - **No long-lived AWS keys.** Local development uses `aws login`, which issues temporary
-  credentials (up to 12 hours); nothing secret is stored in the repo.
+  credentials (up to 12 hours), and the consumer *assumes* its role rather than holding access
+  keys; nothing secret is stored in the repo.
 - **Fault isolation.** If one transport mode fails, the others are still collected. TfL
   rate limits and server errors are retried with exponential backoff.
 - **Graceful shutdown.** On Ctrl+C or `docker stop` (SIGINT/SIGTERM), the producer flushes
@@ -96,16 +100,21 @@ v2.32+ and [Terraform](https://developer.hashicorp.com/terraform/install) 1.16+.
 # 1. Sign in (temporary credentials, no access keys)
 aws login --remote
 
-# 2. Create the S3 bucket
+# 2. Create the S3 bucket and the consumer's IAM role
 cd infra
 terraform init
-terraform plan     # review: 3 to add
+terraform plan     # always review the plan before applying
 terraform apply
-terraform output lake_bucket_name
+terraform output   # lake_bucket_name, consumer_role_arn
+
+# 3. Add a CLI profile that assumes the least-privilege role
+aws configure set role_arn "$(terraform output -raw consumer_role_arn)" --profile tfl-consumer
+aws configure set source_profile default --profile tfl-consumer
+aws configure set region eu-north-1 --profile tfl-consumer
 cd ..
 
-# 3. Point the consumer at the bucket
-LAKE_URI=s3://<bucket-name> FLUSH_MAX_SECONDS=60 python -m tfl_pipeline.consumer
+# 4. Run the consumer with only the role's permissions
+AWS_PROFILE=tfl-consumer LAKE_URI=s3://<bucket-name> FLUSH_MAX_SECONDS=60 python -m tfl_pipeline.consumer
 ```
 
 `LAKE_URI` accepts `s3://bucket[/prefix]` for S3, or a local path (`./data/lake`, `file://...`).
@@ -116,11 +125,16 @@ LAKE_URI=s3://<bucket-name> FLUSH_MAX_SECONDS=60 python -m tfl_pipeline.consumer
 ruff check .            # lint
 ruff format --check .   # formatting
 pytest -v               # unit tests
+
+cd infra
+terraform fmt -check -recursive   # Terraform formatting
+terraform validate                # Terraform syntax and references
 ```
 
-GitHub Actions runs all three on every pull request and on every push to `main`, and branch
-protection blocks merging until they pass. Unit tests use fixed sample data, so they need
-neither Kafka, the TfL API nor AWS.
+GitHub Actions runs two jobs on every pull request and on every push to `main`: `test`
+(ruff + pytest) and `terraform` (fmt + validate, with no AWS access). Branch protection blocks
+merging until both pass. Unit tests use fixed sample data, so they need neither Kafka, the
+TfL API nor AWS.
 
 ## Project structure
 
@@ -132,7 +146,7 @@ src/tfl_pipeline/
   producer.py     TfL -> Kafka
   consumer.py     Kafka -> bronze lake
   sinks.py        file writers: local folder or S3
-infra/            Terraform: S3 data lake bucket
+infra/            Terraform: S3 data lake bucket, consumer IAM role
 tests/            unit tests
 docs/             data exploration notes
 docker-compose.yml  local Kafka + Kafka UI
@@ -147,8 +161,8 @@ the quirks found while exploring it.
 |---|---|---|
 | 1 | Ingestion: TfL → Kafka → bronze lake | ✅ Done |
 | – | CI with GitHub Actions (ruff + pytest), branch protection | ✅ Done |
-| 2 | S3 data lake with Terraform; least-privilege IAM; Terraform checks in CI | ⏳ In progress (S3 done) |
-| 3 | PySpark: bronze → silver (clean, deduplicate) → gold (KPIs) | Planned |
+| 2 | S3 data lake with Terraform; least-privilege IAM; Terraform checks in CI | ✅ Done |
+| 3 | PySpark: bronze → silver (clean, deduplicate) → gold (KPIs) | ⏳ Next |
 | 4 | Glue Data Catalog and Athena | Planned |
 | 5 | Airflow orchestration and data quality checks | Planned |
 | 6 | Streamlit dashboard (live line status, delays, busiest stations) | Planned |
