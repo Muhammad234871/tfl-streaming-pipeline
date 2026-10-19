@@ -13,7 +13,7 @@ from confluent_kafka import Consumer
 
 from .config import TOPIC_DATASETS, Settings
 from .events import lake_partition
-from .sinks import LocalSink
+from .sinks import make_sink
 
 log = logging.getLogger("consumer")
 
@@ -50,7 +50,7 @@ def run(settings: Settings) -> None:
         }
     )
     consumer.subscribe(list(TOPIC_DATASETS))
-    sink = LocalSink(settings.lake_uri)
+    sink = make_sink(settings.lake_uri)
 
     stopping = False
 
