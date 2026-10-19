@@ -3,7 +3,7 @@ name = "tfl-pipeline"
 version = "0.1.0"
 description = "Real-time London transport data pipeline: TfL API -> Kafka -> S3 data lake"
 requires-python = ">=3.12"
-dependencies = ["requests>=2.32", "confluent-kafka>=2.6"]
+dependencies = ["requests>=2.32", "confluent-kafka>=2.6", "boto3[crt]>=1.40"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff==0.17.0"]
