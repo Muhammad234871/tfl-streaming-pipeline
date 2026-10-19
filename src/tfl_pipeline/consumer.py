@@ -83,7 +83,7 @@ def run(settings: Settings) -> None:
         if not buffer:
             last_flush = time.monotonic()
 
-    if buffer:  # NEW: save what's left in memory
+    if buffer:  # save what's left in memory
         for key, data in build_files(buffer, datetime.now(UTC)).items():
             path = sink.write(key, data)
             log.info("wrote %s", path)
