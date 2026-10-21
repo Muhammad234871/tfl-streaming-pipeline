@@ -1,7 +1,7 @@
 """Silver -> gold: minutes per line per status for one day.
 
 Usage:
-    python -m tfl_pipeline.jobs.gold_line_status_daily --dt 2026-10-19 [--lake ./data/lake]
+    python -m tfl_pipeline.jobs.gold.line_status_daily --dt 2026-10-19 [--lake ./data/lake]
 """
 
 import argparse

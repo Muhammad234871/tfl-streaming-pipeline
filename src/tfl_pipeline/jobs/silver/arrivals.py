@@ -1,7 +1,7 @@
 """Bronze -> silver for arrivals: flatten, type, clean and deduplicate one day of data.
 
 Usage:
-    python -m tfl_pipeline.jobs.silver_arrivals --dt 2026-10-19 [--lake ./data/lake]
+    python -m tfl_pipeline.jobs.silver.arrivals --dt 2026-10-19 [--lake ./data/lake]
 """
 
 import argparse

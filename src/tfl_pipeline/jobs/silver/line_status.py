@@ -1,7 +1,7 @@
 """Bronze -> silver for line status: one row per line per status, for one day.
 
 Usage:
-    python -m tfl_pipeline.jobs.silver_line_status --dt 2026-10-19 [--lake ./data/lake]
+    python -m tfl_pipeline.jobs.silver.line_status --dt 2026-10-19 [--lake ./data/lake]
 """
 
 import argparse

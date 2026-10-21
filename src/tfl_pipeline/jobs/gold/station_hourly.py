@@ -5,7 +5,7 @@ predicted within 60 s of the station, and repeated sightings of the same train a
 platform within 10 minutes count once.
 
 Usage:
-    python -m tfl_pipeline.jobs.gold_station_hourly --dt 2026-10-21 [--lake ./data/lake]
+    python -m tfl_pipeline.jobs.gold.station_hourly --dt 2026-10-21 [--lake ./data/lake]
 """
 
 import argparse
@@ -13,11 +13,8 @@ import argparse
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
-from tfl_pipeline.jobs.arrival_events import arrival_events
 from tfl_pipeline.jobs.common import get_spark, read_silver, write_partitioned
-
-ARRIVING_WITHIN_S = 60  # a prediction this close counts as "arriving now"
-SAME_ARRIVAL_GAP_S = 600  # sightings closer than this are the same arrival
+from tfl_pipeline.jobs.gold.arrival_events import arrival_events
 
 
 def transform(silver: DataFrame) -> DataFrame:
