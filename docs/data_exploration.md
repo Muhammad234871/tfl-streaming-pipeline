@@ -41,9 +41,9 @@ Records returned by one arrivals poll (`count=-1`):
 | `naptanId` | Official station ID (use this for joins, not `stationName`) |
 | `timestamp` | When TfL generated the prediction (not when we collected it) |
 | `expectedArrival` | Predicted arrival time at the station |
-| `timeToStation` | Seconds until arrival |
+| `timeToStation` | Seconds until arrival. **Not returned with `count=-1`**, so the pipeline never stores it (see Phase 3 findings) |
 | `currentLocation` | Free text, e.g. "At Pinner Platform 1" |
-| `$type`, `timing` | API metadata, mostly noise. Drop in silver. |
+| `$type`, `timing` | API metadata, mostly noise (`timing` is also absent with `count=-1`). Drop in silver. |
 
 ### Findings
 - **`id` is not unique.** One tube poll had 4,313 records but only 3,952 distinct IDs, and
@@ -53,8 +53,29 @@ Records returned by one arrivals poll (`count=-1`):
   (e.g. Piccadilly train 224 appeared 22 times in one poll). One row means
   "train X is expected at station Y at time Z".
 - **Placeholder values.** Some records have `vehicleId = "000"` (57 Metropolitan line records in
-  one poll), which is not a real train. These need to be filtered or flagged in silver.
+  one poll), which is not a real train. Silver keeps these rows and sets `vehicle_id` to NULL
+  (see Phase 3 findings).
 - Because `timestamp` is TfL's time, the pipeline adds its own `ingested_at` timestamp to each record.
+
+## Findings from Spark exploration (Phase 3)
+
+Bronze data loaded with PySpark (local lake, 2 days: 2026-10-15 and 2026-10-19, 534,182 arrival rows).
+Spark read `dt` and `hour` directly from the Hive-style folder names (partition discovery).
+
+| # | Finding | Evidence | Silver rule |
+|---|---|---|---|
+| 1 | **`timeToStation` and `timing` are not stored.** With `count=-1` the API returns a slimmer record without them. | Absent from the inferred schema | Derive `time_to_station_s = expected_arrival − prediction_ts` |
+| 2 | **`(poll_id, id)` is not a unique key.** The DLR reuses one prediction `id` for several different trains at the same station (different platforms and arrival times). | 534,182 rows but 496,933 distinct `(poll_id, id)`; 18,471 shared keys. Example: one `id` at Gallions Reach with 5 trains, 4–10 minutes apart | Deduplicate on the **full row**: at-least-once replays are byte-identical. Only 52 rows were true duplicates |
+| 3 | **Missing train numbers.** `vehicleId` is empty (mostly the DLR) or the placeholder `"000"`. | 16,836 empty + 6,076 `"000"` | **Keep the rows** (they are real arrivals) and set `vehicle_id` to NULL |
+| 4 | **Timestamps are strings** with a varying number of decimals, e.g. `2026-10-19T10:18:22.89Z` and `...22.551Z`. | `printSchema()` shows `string` | Cast to `timestamp` |
+| 5 | `timeToLive` always equals `expectedArrival`. | Sample rows | Drop as redundant |
+
+Rows are dropped only when they cannot be placed at all: no `lineId`, no `naptanId` or no
+`expectedArrival`.
+
+> **Lesson:** the planned deduplication key `(poll_id, id)` would have silently deleted about
+> 37,000 real DLR arrivals (7% of the rows). Exploring the stored data before writing the
+> transformation caught it.
 
 ## Line status: key fields
 
