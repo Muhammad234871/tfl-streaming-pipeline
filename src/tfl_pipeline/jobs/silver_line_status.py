@@ -35,7 +35,7 @@ def transform(raw: DataFrame) -> DataFrame:
         F.col("status.reason").alias("reason"),
         F.col("status.disruption.category").alias("disruption_category"),
         "dt",
-    )
+    ).dropDuplicates()
 
 
 def main() -> None:
@@ -49,7 +49,13 @@ def main() -> None:
     print("bronze rows:", raw.count())
 
     silver = transform(raw)
-    silver = write_partitioned(silver, f"{args.lake}/silver/line_status")
+    write_partitioned(silver, f"{args.lake}/silver/line_status")
+
+    written = spark.read.parquet(f"{args.lake}/silver/line_status").where(
+        F.col("dt") == args.dt
+    )
+    print(f"silver rows written for {args.dt}:", written.count())
+    spark.stop()
 
 
 if __name__ == "__main__":
