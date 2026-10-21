@@ -5,31 +5,11 @@ Usage:
 """
 
 import argparse
-import os
-import sys
 
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
-
-def get_spark(app_name: str) -> SparkSession:
-    """Create (or reuse) a local Spark session."""
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    spark = (
-        SparkSession.builder.master("local[*]")
-        .appName(app_name)
-        .config("spark.sql.session.timeZone", "UTC")
-        .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
-    return spark
-
-
-def read_bronze(spark: SparkSession, lake: str, dt: str) -> DataFrame:
-    """Read one day of bronze arrivals."""
-    path = f"{lake}/bronze/arrivals"
-    return spark.read.json(path).where(F.col("dt") == dt)
+from tfl_pipeline.jobs.common import get_spark, read_bronze, write_partitioned
 
 
 def transform(raw: DataFrame) -> DataFrame:
@@ -81,13 +61,6 @@ def transform(raw: DataFrame) -> DataFrame:
     ).dropDuplicates()
 
 
-def write_silver(df: DataFrame, lake: str) -> None:
-    """Write silver arrival as a Parquet, replacing only the days present in df"""
-
-    path = f"{lake}/silver/arrivals"
-    (df.repartition("dt").write.mode("overwrite").partitionBy("dt").parquet(path))
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dt", required=True, help="day to process, e.g. 2026-10-19")
@@ -95,11 +68,11 @@ def main() -> None:
     args = parser.parse_args()
 
     spark = get_spark("silver_arrivals")
-    raw = read_bronze(spark, args.lake, args.dt)
+    raw = read_bronze(spark, args.lake, "arrivals", args.dt)
     print("bronze rows:", raw.count())
 
     silver = transform(raw)
-    write_silver(silver, args.lake)
+    write_partitioned(silver, f"{args.lake}/silver/arrivals")
 
     written = spark.read.parquet(f"{args.lake}/silver/arrivals").where(
         F.col("dt") == args.dt
