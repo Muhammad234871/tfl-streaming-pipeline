@@ -41,3 +41,8 @@ def read_bronze(spark: SparkSession, lake: str, dataset: str, dt: str) -> DataFr
     column and only opens that day's files (partition pruning).
     """
     return spark.read.json(f"{lake}/bronze/{dataset}").where(F.col("dt") == dt)
+
+
+def read_silver(spark: SparkSession, lake: str, dataset: str, dt: str) -> DataFrame:
+    """Read one day of a silver dataset (Parquet)."""
+    return spark.read.parquet(f"{lake}/silver/{dataset}").where(F.col("dt") == dt)
