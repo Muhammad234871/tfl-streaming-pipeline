@@ -15,6 +15,14 @@ def get_spark(app_name: str) -> SparkSession:
         .appName(app_name)
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
+        .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.5.0")
+        .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.5.0")
+        # Credentials from the standard AWS chain (env vars, AWS_PROFILE, instance role...).
+        .config(
+            "spark.hadoop.fs.s3a.aws.credentials.provider",
+            "software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider",
+        )
+        .config("spark.hadoop.fs.s3a.endpoint.region", "eu-north-1")
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("WARN")
