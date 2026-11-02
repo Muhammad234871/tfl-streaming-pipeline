@@ -12,3 +12,15 @@ output "spark_jobs_role_arn" {
   description = "IAM role the Spark jobs assume (read all layers, write silver and gold)"
   value       = aws_iam_role.spark_jobs.arn
 }
+
+
+output "athena_workgroup_name" {
+  description = "Athena workgroup for queries on the data lake; use it as ATHENA_WORKGROUP"
+  value       = aws_athena_workgroup.tfl.name
+}
+
+
+output "glue_catalog_database_name" {
+  description = "Glue catalog database for the data lake; use it as GLUE_CATALOG_DATABASE"
+  value       = aws_glue_catalog_database.lake.name
+}
