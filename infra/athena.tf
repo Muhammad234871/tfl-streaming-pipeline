@@ -33,15 +33,15 @@ resource "aws_glue_catalog_table" "gold_line_status_daily" {
   table_type    = "EXTERNAL_TABLE"
 
   parameters = {
-    EXTERNAL                    = "TRUE"
-    classification              = "parquet"
-    "projection.enabled"        = "true"
-    "projection.dt.type"        = "date"
-    "projection.dt.format"      = "yyyy-MM-dd"
-    "projection.dt.range"       = "2026-10-01,NOW"
-    "projection.dt.interval"    = "1"
+    EXTERNAL                      = "TRUE"
+    classification                = "parquet"
+    "projection.enabled"          = "true"
+    "projection.dt.type"          = "date"
+    "projection.dt.format"        = "yyyy-MM-dd"
+    "projection.dt.range"         = "2026-10-01,NOW"
+    "projection.dt.interval"      = "1"
     "projection.dt.interval.unit" = "DAYS"
-    "storage.location.template" = "s3://${aws_s3_bucket.lake.bucket}/gold/line_status_daily/dt=$${dt}"
+    "storage.location.template"   = "s3://${aws_s3_bucket.lake.bucket}/gold/line_status_daily/dt=$${dt}"
   }
 
   partition_keys {
