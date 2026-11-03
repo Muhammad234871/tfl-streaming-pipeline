@@ -6,9 +6,10 @@ A data pipeline for London transport. It streams live train arrival predictions 
 disruptions for the Tube, DLR, Elizabeth line and Overground from the
 [TfL Unified API](https://api.tfl.gov.uk) through **Kafka** into an **S3 data lake**, then uses
 **PySpark** to turn the raw data into clean **silver** tables and analytics-ready **gold** tables
-(delay minutes per line, busiest stations, time between trains). Every table is registered in
-the **AWS Glue Data Catalog** and can be queried with plain SQL in **Amazon Athena**. The AWS
-infrastructure is provisioned by **Terraform**.
+(delay minutes per line, busiest stations, time between trains). **Apache Airflow** runs the
+batch jobs every day in dependency order, with retries, backfills and data quality checks. Every
+table is registered in the **AWS Glue Data Catalog** and can be queried with plain SQL in
+**Amazon Athena**. The AWS infrastructure is provisioned by **Terraform**.
 
 **Scale:** about **8,600 events per poll**, polled every minute, up to about **12 million events per day**.
 Gzip compression reduces the raw JSON about **17×** on disk; for one day, 43 MB of bronze
@@ -27,6 +28,8 @@ flowchart LR
     F --> K[Glue Data Catalog<br/>tfl_lake]
     G --> K
     K --> H[Athena SQL]
+    W[Airflow DAG<br/>tfl_daily] -.->|schedules + checks| F
+    W -.-> G
     T[Terraform] -.->|bucket, IAM roles,<br/>catalog, workgroup| E
     H -.->|planned| I[Streamlit dashboard]
 ```
@@ -38,6 +41,7 @@ flowchart LR
 | **Consumer** (`consumer.py`) | Reads both topics, buffers messages, and writes gzipped JSON Lines files to bronze, partitioned by ingestion hour |
 | **Sinks** (`sinks.py`) | Write files to the lake: an S3 bucket or a local folder, chosen by one setting (`LAKE_URI`) without changing the consumer |
 | **Spark jobs** (`jobs/silver/`, `jobs/gold/`) | Batch jobs, one day at a time: bronze → silver (clean, typed, deduplicated) → gold (aggregated answers) |
+| **Orchestration** (`dags/tfl_daily.py`) | Airflow DAG that, once a day, checks bronze exists, runs the five Spark jobs in dependency order and finishes with data quality checks |
 | **Catalog and SQL** (`infra/athena.tf`, `sql/`) | Glue database `tfl_lake` with all silver and gold tables (partition projection on `dt`), and an Athena workgroup with a 1 GB per-query scan limit |
 | **Infrastructure** (`infra/`) | Terraform for the S3 bucket (private, tagged, raw bronze expires after 30 days, query results after 7), two least-privilege IAM roles (consumer and Spark jobs), and the catalog and workgroup |
 
@@ -135,6 +139,42 @@ Example queries live in [`sql/`](sql/):
 A gold-table query scans only kilobytes (for example 0.87 KB in about 0.4 seconds), so it costs
 a tiny fraction of a cent.
 
+## Orchestration (Airflow)
+
+The `tfl_daily` DAG ([`dags/tfl_daily.py`](dags/tfl_daily.py)) runs once a day for the day that
+has just ended. Each task runs one job with `--dt {{ ds }}` (the run's logical date):
+
+```mermaid
+flowchart LR
+    B[check_bronze] --> SA[silver_arrivals]
+    B --> SL[silver_line_status]
+    SA --> GS[gold_station_hourly]
+    SA --> GH[gold_line_headways]
+    SL --> GL[gold_line_status_daily]
+    GS --> Q[check_quality]
+    GH --> Q
+    GL --> Q
+```
+
+| Task | What it does |
+|---|---|
+| `check_bronze` | Exits with code 99 if there is no bronze data for the day, which **skips** the whole run (a day with nothing collected is not an error) |
+| silver and gold tasks | The Spark jobs, in dependency order; retried twice, 5 minutes apart |
+| `check_quality` | Fails the run if any table is empty, keys are NULL, duplicates appear or metrics are out of range; known issues are logged as warnings. Not retried, as a data problem won't fix itself |
+
+So a run's colour means something: **green** = processed and checked, **skipped** = no data
+was collected that day, **red** = a real problem to investigate.
+
+- **Backfills.** Because every job is idempotent, a whole range can be re-run safely, e.g.
+  `airflow backfill create --dag-id tfl_daily --from-date 2026-10-15 --to-date 2026-10-21 --max-active-runs 1`.
+- **Local or cloud.** The same DAG runs on the local lake or on S3, chosen by environment
+  (`TFL_LAKE=s3a://<bucket>` and `AWS_PROFILE=tfl-spark-process`); tasks then use the
+  least-privilege Spark role.
+- **Sized for a laptop.** `max_active_runs=1` and `max_active_tasks=1` keep it to one Spark job
+  at a time; on a cluster the two gold branches could run in parallel.
+- **Isolated environments.** Airflow runs in its own virtualenv (installed with the official
+  constraints file); tasks call the project's virtualenv, so their dependencies never clash.
+
 ## Design decisions
 
 **Ingestion**
@@ -213,6 +253,26 @@ All settings have sensible defaults and can be overridden with environment varia
 [`.env.example`](.env.example). A free [TfL app key](https://api-portal.tfl.gov.uk) is optional
 and raises the API rate limit. For quieter Spark logs, `export SPARK_CONF_DIR=$PWD/conf`.
 
+### Run the batch jobs with Airflow
+
+Airflow 3.3 runs in its own virtualenv, outside the repo:
+
+```bash
+uv venv --python 3.12 ~/airflow-venv
+uv pip install --python ~/airflow-venv/bin/python "apache-airflow==3.3.2" \
+  --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-3.3.2/constraints-3.12.txt"
+
+export AIRFLOW_HOME=~/airflow
+export AIRFLOW__CORE__DAGS_FOLDER="$PWD/dags"
+export AIRFLOW__CORE__LOAD_EXAMPLES=False
+export AIRFLOW__API__PORT=8081                       # 8080 is taken by Kafka UI
+export AIRFLOW__API__BASE_URL=http://localhost:8081  # tasks reach the API server here
+
+source ~/airflow-venv/bin/activate
+airflow standalone                       # UI at http://localhost:8081 (admin password is printed)
+airflow dags test tfl_daily 2026-10-21   # in another terminal: run one day end to end
+```
+
 ## Run against AWS
 
 Prerequisites: an AWS account, [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
@@ -249,6 +309,10 @@ AWS_PROFILE=tfl-consumer LAKE_URI=s3://<bucket-name> python -m tfl_pipeline.cons
 export AWS_PROFILE=tfl-spark-process
 python -m tfl_pipeline.jobs.silver.arrivals --dt 2026-10-21 --lake s3a://<bucket-name>
 # ...and the other four jobs, silver before gold
+
+# ...or let Airflow run the whole DAG on S3 (set the same variables for airflow standalone)
+export TFL_LAKE=s3a://<bucket-name>
+airflow dags test tfl_daily 2026-10-21
 ```
 
 `LAKE_URI` (consumer) accepts `s3://bucket[/prefix]` or a local path; Spark jobs use `s3a://`
@@ -262,14 +326,21 @@ ruff check .            # lint
 ruff format --check .   # formatting
 pytest -v               # 14 unit tests, including Spark transformations
 
+pytest tests/test_dags.py -v   # in the Airflow virtualenv: DAG structure tests
+
 cd infra
 terraform fmt -check -recursive   # Terraform formatting
 terraform validate                # Terraform syntax and references
 ```
 
-GitHub Actions runs two jobs on every pull request and on every push to `main`: `test`
-(Python 3.12 + Java 21, ruff and pytest) and `terraform` (fmt + validate, with no AWS access).
-Branch protection blocks merging until both pass.
+GitHub Actions runs three jobs on every pull request and on every push to `main`: `test`
+(Python 3.12 + Java 21, ruff and pytest), `dags` (Airflow 3.3.2 with its constraints, DAG
+structure tests) and `terraform` (fmt + validate, with no AWS access). Branch protection blocks
+merging until they pass.
+
+The DAG tests load `dags/` and check that it imports without errors, has the expected tasks and
+dependencies, passes `{{ ds }}` to every job, retries jobs but not checks, and keeps the
+concurrency limits. They skip themselves where Airflow isn't installed.
 
 The Spark tests build tiny DataFrames with explicit schemas and check the rules that matter,
 for example: placeholder vehicle IDs become NULL without dropping rows, exact replays are
@@ -292,6 +363,9 @@ src/tfl_pipeline/
     silver/            arrivals.py, line_status.py
     gold/              arrival_events.py (shared rules), line_status_daily.py,
                        station_hourly.py, line_headways.py
+    bronze_exists.py   "is there data for this day?" (exit 99 = skip the run)
+    quality.py         data quality checks for one day of silver and gold
+dags/                  Airflow DAG: tfl_daily.py
 infra/                 Terraform: S3 bucket, IAM roles (main.tf, iam.tf),
                        Glue tables and Athena workgroup (athena.tf)
 sql/                   example Athena queries on the gold tables
@@ -310,6 +384,6 @@ docker-compose.yml     local Kafka + Kafka UI
 | 2 | S3 data lake with Terraform; least-privilege IAM; Terraform checks in CI | ✅ Done |
 | 3 | PySpark: bronze → silver → gold, Spark tests in CI, jobs running on S3 | ✅ Done |
 | 4 | Glue Data Catalog and Athena: all tables queryable with SQL, partition projection | ✅ Done |
-| 5 | Airflow orchestration and data quality checks | ⏳ Next |
-| 6 | Streamlit dashboard (live line status, delays, busiest stations) | Planned |
+| 5 | Airflow orchestration: daily DAG, data quality checks, skip on missing data, backfills, DAG tests in CI | ✅ Done |
+| 6 | Streamlit dashboard (live line status, delays, busiest stations) | ⏳ Next |
 | 7 | Docker images, 24/7 deployment, CD | Planned |
