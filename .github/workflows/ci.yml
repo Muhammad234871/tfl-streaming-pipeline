@@ -32,6 +32,29 @@ jobs:
 
       - name: Run tests
         run: pytest -v
+
+  dags:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # Airflow gets its own environment (as locally), installed with its official constraints.
+      - name: Install Airflow 3.3.2 and pytest
+        run: >
+          pip install "apache-airflow==3.3.2" pytest
+          --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-3.3.2/constraints-3.12.txt"
+
+      - name: Test DAG structure
+        env:
+          AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+        run: pytest tests/test_dags.py -v
+
   terraform:
     runs-on: ubuntu-24.04
     defaults:
