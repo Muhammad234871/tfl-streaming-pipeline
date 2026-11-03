@@ -14,7 +14,7 @@ PYTHON = f"{REPO}/.venv/bin/python"
 LAKE = os.environ.get("TFL_LAKE", f"{REPO}/data/lake")
 
 
-def spark_job(task_id: str, module: str) -> BashOperator:
+def spark_job(task_id: str, module: str, **kwargs) -> BashOperator:
     """A task that runs one Spark job for the run's day: --dt {{ ds }}."""
     return BashOperator(
         task_id=task_id,
@@ -23,6 +23,7 @@ def spark_job(task_id: str, module: str) -> BashOperator:
         cwd=REPO,
         env={"SPARK_CONF_DIR": f"{REPO}/conf"},
         append_env=True,
+        **kwargs,
     )
 
 
@@ -43,7 +44,7 @@ with DAG(
     )
     gold_station_hourly = spark_job("gold_station_hourly", "gold.station_hourly")
     gold_line_headways = spark_job("gold_line_headways", "gold.line_headways")
-    check_quality = spark_job("check_quality", "quality")
+    check_quality = spark_job("check_quality", "quality", retries=0)
 
     silver_arrivals >> [gold_station_hourly, gold_line_headways]
     silver_line_status >> [gold_line_status_daily]
