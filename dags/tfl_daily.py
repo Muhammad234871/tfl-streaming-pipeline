@@ -14,7 +14,7 @@ PYTHON = f"{REPO}/.venv/bin/python"
 LAKE = os.environ.get("TFL_LAKE", f"{REPO}/data/lake")
 
 
-def spark_job(task_id: str, module: str, **kwargs) -> BashOperator:
+def pipeline_task(task_id: str, module: str, **kwargs) -> BashOperator:
     """A task that runs one Spark job for the run's day: --dt {{ ds }}."""
     return BashOperator(
         task_id=task_id,
@@ -37,16 +37,18 @@ with DAG(
     default_args={"retries": 2, "retry_delay": timedelta(minutes=5)},
     tags=["tfl"],
 ) as dag:
-    silver_arrivals = spark_job("silver_arrivals", "silver.arrivals")
-    silver_line_status = spark_job("silver_line_status", "silver.line_status")
-    gold_line_status_daily = spark_job(
+    silver_arrivals = pipeline_task("silver_arrivals", "silver.arrivals")
+    silver_line_status = pipeline_task("silver_line_status", "silver.line_status")
+    gold_line_status_daily = pipeline_task(
         "gold_line_status_daily", "gold.line_status_daily"
     )
-    gold_station_hourly = spark_job("gold_station_hourly", "gold.station_hourly")
-    gold_line_headways = spark_job("gold_line_headways", "gold.line_headways")
-    check_quality = spark_job("check_quality", "quality", retries=0)
+    gold_station_hourly = pipeline_task("gold_station_hourly", "gold.station_hourly")
+    gold_line_headways = pipeline_task("gold_line_headways", "gold.line_headways")
+    check_quality = pipeline_task("check_quality", "quality", retries=0)
+    check_bronze = pipeline_task("check_bronze", "bronze_exists", retries=0)
 
     silver_arrivals >> [gold_station_hourly, gold_line_headways]
     silver_line_status >> [gold_line_status_daily]
 
     [gold_line_status_daily, gold_station_hourly, gold_line_headways] >> check_quality
+    check_bronze >> [silver_arrivals, silver_line_status]
