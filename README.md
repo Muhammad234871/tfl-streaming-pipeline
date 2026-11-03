@@ -6,8 +6,9 @@ A data pipeline for London transport. It streams live train arrival predictions 
 disruptions for the Tube, DLR, Elizabeth line and Overground from the
 [TfL Unified API](https://api.tfl.gov.uk) through **Kafka** into an **S3 data lake**, then uses
 **PySpark** to turn the raw data into clean **silver** tables and analytics-ready **gold** tables
-(delay minutes per line, busiest stations, time between trains). The AWS infrastructure is
-provisioned by **Terraform**.
+(delay minutes per line, busiest stations, time between trains). Every table is registered in
+the **AWS Glue Data Catalog** and can be queried with plain SQL in **Amazon Athena**. The AWS
+infrastructure is provisioned by **Terraform**.
 
 **Scale:** about **8,600 events per poll**, polled every minute, up to about **12 million events per day**.
 Gzip compression reduces the raw JSON about **17×** on disk; for one day, 43 MB of bronze
@@ -23,9 +24,11 @@ flowchart LR
     D -->|gzipped JSON Lines| E[(S3 bronze)]
     E -->|PySpark| F[(S3 silver<br/>Parquet)]
     F -->|PySpark| G[(S3 gold<br/>Parquet)]
-    T[Terraform] -.->|bucket + IAM roles| E
-    G -.->|planned| H[Athena]
-    H -.-> I[Streamlit dashboard]
+    F --> K[Glue Data Catalog<br/>tfl_lake]
+    G --> K
+    K --> H[Athena SQL]
+    T[Terraform] -.->|bucket, IAM roles,<br/>catalog, workgroup| E
+    H -.->|planned| I[Streamlit dashboard]
 ```
 
 | Component | What it does |
@@ -35,7 +38,8 @@ flowchart LR
 | **Consumer** (`consumer.py`) | Reads both topics, buffers messages, and writes gzipped JSON Lines files to bronze, partitioned by ingestion hour |
 | **Sinks** (`sinks.py`) | Write files to the lake: an S3 bucket or a local folder, chosen by one setting (`LAKE_URI`) without changing the consumer |
 | **Spark jobs** (`jobs/silver/`, `jobs/gold/`) | Batch jobs, one day at a time: bronze → silver (clean, typed, deduplicated) → gold (aggregated answers) |
-| **Infrastructure** (`infra/`) | Terraform for the S3 bucket (private, tagged, raw bronze expires after 30 days) and two least-privilege IAM roles: one for the consumer, one for the Spark jobs |
+| **Catalog and SQL** (`infra/athena.tf`, `sql/`) | Glue database `tfl_lake` with all silver and gold tables (partition projection on `dt`), and an Athena workgroup with a 1 GB per-query scan limit |
+| **Infrastructure** (`infra/`) | Terraform for the S3 bucket (private, tagged, raw bronze expires after 30 days, query results after 7), two least-privilege IAM roles (consumer and Spark jobs), and the catalog and workgroup |
 
 ## Data model (medallion architecture)
 
@@ -88,6 +92,49 @@ Gold tables rest on a few explicit modelling choices:
 - The median uses `percentile_approx`, which returns a real data value rather than an
   interpolated one.
 
+### Known limitations
+
+Found by sense-checking the gold tables in Athena against how the network really runs:
+
+- **Low-frequency services sit at the 30-minute limit.** Some Elizabeth line stations west of
+  London have a real 30-minute off-peak service, and several Tube gaps land just under 30
+  minutes, so genuine long gaps may be dropped as "collection gaps". A per-line limit, or
+  checking whether polls were actually missing during the gap, would be more accurate.
+- **Occasional double counting.** A few platforms show a median headway of 0 minutes, which is
+  physically impossible: trains without a `vehicle_id` can get a new prediction ID between
+  polls and be counted as two arrivals. Merging events at the same platform within a minute or
+  two would fix it.
+- **Partial days and hours.** Collection has not yet run for a full 24 hours, so totals cover
+  only the observed time.
+
+## Query with SQL (Athena)
+
+All silver and gold tables are registered in the Glue Data Catalog database **`tfl_lake`** and
+can be queried in Athena using the **`tfl`** workgroup (results are written to
+`athena-results/` and expire after 7 days; queries scanning more than 1 GB are cancelled).
+
+| Table | Source |
+|---|---|
+| `silver_arrivals`, `silver_line_status` | `silver/<table>/dt=…/` |
+| `gold_line_status_daily`, `gold_station_hourly`, `gold_line_headways` | `gold/<table>/dt=…/` |
+
+Tables use **partition projection** on `dt`: Athena computes the partitions from the folder
+pattern, so new days are queryable immediately, with no crawler or `MSCK REPAIR TABLE`.
+Filter on `dt` (a string, e.g. `dt = '2026-10-21'`) so that only that day's files are read.
+The tables are defined once in Terraform with `for_each` over a map of table names, paths and
+column types.
+
+Example queries live in [`sql/`](sql/):
+
+| Query | Question | Sample result (2026-10-21) |
+|---|---|---|
+| [`delay_minutes_by_line.sql`](sql/delay_minutes_by_line.sql) | Which lines were disrupted, and for how long? | Victoria: minor delays for 100% of the observed time; Central 35% |
+| [`busiest_stations.sql`](sql/busiest_stations.sql) | Which stations had the most train arrivals? | King's Cross St. Pancras 330, Euston 255, Waterloo 240 |
+| [`longest_waits.sql`](sql/longest_waits.sql) | Where were the longest gaps between Tube trains? | Central line west (Ruislip Gardens, Hanger Lane) and Piccadilly at Northfields, up to ~30 minutes |
+
+A gold-table query scans only kilobytes (for example 0.87 KB in about 0.4 seconds), so it costs
+a tiny fraction of a cent.
+
 ## Design decisions
 
 **Ingestion**
@@ -124,9 +171,13 @@ Gold tables rest on a few explicit modelling choices:
   separate from reading and writing, and is unit-tested with tiny DataFrames.
 
 **Infrastructure and security**
-- **Infrastructure as code.** The bucket and IAM roles are created by Terraform, never by
-  hand: public access is blocked, every resource is tagged, and a lifecycle rule deletes raw
-  bronze after 30 days to control cost (silver and gold are kept).
+- **Infrastructure as code.** The bucket, IAM roles, Glue tables and Athena workgroup are
+  created by Terraform, never by hand: public access is blocked, every resource is tagged, and
+  lifecycle rules delete raw bronze after 30 days and query results after 7 (silver and gold
+  are kept). Refactoring the first Glue table into `for_each` used a `moved` block, so nothing
+  was destroyed.
+- **Cost guardrails.** Athena queries are capped at 1 GB scanned each, and Parquet plus
+  partition projection keep typical queries to kilobytes.
 - **Least privilege per layer.** The consumer role can only `s3:PutObject` under `bronze/`.
   The Spark role can read all layers and write/delete only `silver/` and `gold/`, so batch
   jobs cannot modify raw data. Both were verified with negative tests (denied writes,
@@ -171,12 +222,12 @@ v2.32+ and [Terraform](https://developer.hashicorp.com/terraform/install) 1.16+.
 # 1. Sign in (temporary credentials, no access keys)
 aws login --remote
 
-# 2. Create the bucket and the two IAM roles
+# 2. Create the bucket, the two IAM roles, the Glue catalog and the Athena workgroup
 cd infra
 terraform init
 terraform plan     # always review the plan before applying
 terraform apply
-terraform output   # lake_bucket_name, consumer_role_arn, spark_jobs_role_arn
+terraform output   # bucket name, role ARNs, Athena workgroup, Glue database
 
 # 3. CLI profiles that assume the least-privilege roles
 aws configure set role_arn "$(terraform output -raw consumer_role_arn)" --profile tfl-consumer
@@ -241,7 +292,9 @@ src/tfl_pipeline/
     silver/            arrivals.py, line_status.py
     gold/              arrival_events.py (shared rules), line_status_daily.py,
                        station_hourly.py, line_headways.py
-infra/                 Terraform: S3 bucket, consumer and Spark IAM roles
+infra/                 Terraform: S3 bucket, IAM roles (main.tf, iam.tf),
+                       Glue tables and Athena workgroup (athena.tf)
+sql/                   example Athena queries on the gold tables
 tests/                 unit tests (conftest.py holds the shared Spark fixtures)
 docs/                  data exploration notes
 conf/                  log4j2.properties for quieter local Spark logs
@@ -256,7 +309,7 @@ docker-compose.yml     local Kafka + Kafka UI
 | – | CI with GitHub Actions, branch protection | ✅ Done |
 | 2 | S3 data lake with Terraform; least-privilege IAM; Terraform checks in CI | ✅ Done |
 | 3 | PySpark: bronze → silver → gold, Spark tests in CI, jobs running on S3 | ✅ Done |
-| 4 | Glue Data Catalog and Athena | ⏳ Next |
-| 5 | Airflow orchestration and data quality checks | Planned |
+| 4 | Glue Data Catalog and Athena: all tables queryable with SQL, partition projection | ✅ Done |
+| 5 | Airflow orchestration and data quality checks | ⏳ Next |
 | 6 | Streamlit dashboard (live line status, delays, busiest stations) | Planned |
 | 7 | Docker images, 24/7 deployment, CD | Planned |

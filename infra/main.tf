@@ -26,4 +26,17 @@ resource "aws_s3_bucket_lifecycle_configuration" "lake" {
       days = 30
     }
   }
+
+  rule {
+    id     = "expire-athena-results"
+    status = "Enabled"
+
+    filter {
+      prefix = "athena-results/"
+    }
+
+    expiration {
+      days = 7
+    }
+  }
 }
