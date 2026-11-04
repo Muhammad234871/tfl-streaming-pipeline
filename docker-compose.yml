@@ -39,6 +39,39 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+
+  # The pipeline itself: one image (Dockerfile, target "stream"), two services.
+  # Containers reach Kafka by its service name on the INTERNAL listener, not localhost.
+  producer:
+    build:
+      context: .
+      target: stream
+    image: tfl-stream
+    container_name: producer
+    command: ["python", "-m", "tfl_pipeline.producer"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      TFL_APP_KEY: ${TFL_APP_KEY:-}
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  consumer:
+    image: tfl-stream # same image; built once by the producer service
+    container_name: consumer
+    command: ["python", "-m", "tfl_pipeline.consumer"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      LAKE_URI: /data/lake
+    volumes:
+      # Writes go to your local data/lake, so Spark and Airflow find the files as before.
+      - ./data/lake:/data/lake
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+
 volumes:
   kafka-data:
     
