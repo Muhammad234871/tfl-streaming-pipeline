@@ -9,7 +9,10 @@ disruptions for the Tube, DLR, Elizabeth line and Overground from the
 (delay minutes per line, busiest stations, time between trains). **Apache Airflow** runs the
 batch jobs every day in dependency order, with retries, backfills and data quality checks. Every
 table is registered in the **AWS Glue Data Catalog** and can be queried with plain SQL in
-**Amazon Athena**. The AWS infrastructure is provisioned by **Terraform**.
+**Amazon Athena**. A public **Streamlit** dashboard reads the gold tables through Athena with a
+read-only IAM user. The AWS infrastructure is provisioned by **Terraform**.
+
+**Live dashboard:** [tfl-london-network.streamlit.app](https://tfl-london-network.streamlit.app/)
 
 **Scale:** about **8,600 events per poll**, polled every minute, up to about **12 million events per day**.
 Gzip compression reduces the raw JSON about **17×** on disk; for one day, 43 MB of bronze
@@ -31,7 +34,7 @@ flowchart LR
     W[Airflow DAG<br/>tfl_daily] -.->|schedules + checks| F
     W -.-> G
     T[Terraform] -.->|bucket, IAM roles,<br/>catalog, workgroup| E
-    H -.->|planned| I[Streamlit dashboard]
+    H -->|read-only IAM user| I[Streamlit dashboard<br/>Community Cloud]
 ```
 
 | Component | What it does |
@@ -43,7 +46,8 @@ flowchart LR
 | **Spark jobs** (`jobs/silver/`, `jobs/gold/`) | Batch jobs, one day at a time: bronze → silver (clean, typed, deduplicated) → gold (aggregated answers) |
 | **Orchestration** (`dags/tfl_daily.py`) | Airflow DAG that, once a day, checks bronze exists, runs the five Spark jobs in dependency order and finishes with data quality checks |
 | **Catalog and SQL** (`infra/athena.tf`, `sql/`) | Glue database `tfl_lake` with all silver and gold tables (partition projection on `dt`), and an Athena workgroup with a 1 GB per-query scan limit |
-| **Infrastructure** (`infra/`) | Terraform for the S3 bucket (private, tagged, raw bronze expires after 30 days, query results after 7), two least-privilege IAM roles (consumer and Spark jobs), and the catalog and workgroup |
+| **Dashboard** (`dashboard/`) | Streamlit app with Altair charts: disruptions by line, arrivals per hour, busiest stations, service frequency. Reads local Parquet or Athena, chosen by one setting |
+| **Infrastructure** (`infra/`) | Terraform for the S3 bucket (private, tagged, raw bronze expires after 30 days, query results after 7), two least-privilege IAM roles (consumer and Spark jobs), a read-only IAM user for the dashboard, and the catalog and workgroup |
 
 ## Data model (medallion architecture)
 
@@ -175,6 +179,68 @@ was collected that day, **red** = a real problem to investigate.
 - **Isolated environments.** Airflow runs in its own virtualenv (installed with the official
   constraints file); tasks call the project's virtualenv, so their dependencies never clash.
 
+## Dashboard
+
+**Live:** [tfl-london-network.streamlit.app](https://tfl-london-network.streamlit.app/), hosted on Streamlit Community Cloud ([`dashboard/app.py`](dashboard/app.py)).
+
+![Dashboard overview: KPI tiles and minutes in a non-good status per line](docs/images/dashboard-overview.png)
+![Dashboard detail: train arrivals per hour, busiest stations, time between trains](docs/images/dashboard-detail.png)
+
+Pick a day and the page shows that day's gold data:
+
+| Section | Gold table | What it answers |
+|---|---|---|
+| KPI tiles | all three | Train arrivals, stations served, lines with a disruption |
+| Non-good status by line | `line_status_daily` | Which lines were disrupted, how badly and for how long (overnight closures left out) |
+| Arrivals per hour | `station_hourly` | The shape of the day: overnight closure, morning peak |
+| Busiest stations | `station_hourly` | Most train arrivals; a station's Tube, rail and Elizabeth line entries are merged by name |
+| Time between trains | `line_headways` | Median minutes between trains per line (platform-hours with 5+ trains) |
+
+**How it gets data** ([`dashboard/data.py`](dashboard/data.py)):
+
+- **One switch, two backends.** `DASHBOARD_SOURCE=local` reads the Parquet files in
+  `data/lake/gold/`; `DASHBOARD_SOURCE=athena` queries the same tables in S3 through Athena with
+  [awswrangler](https://github.com/aws/aws-sdk-pandas). The page code doesn't know which one
+  it's using.
+- **Safe SQL.** The day is passed as a query parameter (`WHERE dt = :dt`), never formatted into
+  the SQL; table names, which can't be parameters, are checked against an allowlist.
+- **Read-only queries.** `ctas_approach=False` reads Athena's result file directly instead of
+  creating temporary tables, so the app needs no Glue write or S3 delete permissions.
+- **Caching.** `st.cache_data` keeps each day's results for an hour and the list of days for
+  10 minutes. Athena is queried once per day viewed, not on every click, so a public app costs
+  almost nothing; the workgroup's 1 GB scan limit caps any single query.
+- **Configured by environment.** Locally the app uses an AWS CLI profile; on Streamlit Cloud the
+  access key and `DASHBOARD_SOURCE` are app secrets, exposed as environment variables. No code
+  changes between the two.
+
+### Security: least privilege, verified
+
+The deployed app uses the IAM user `tfl-dashboard` ([`infra/dashboard.tf`](infra/dashboard.tf)).
+It can run queries in the `tfl` workgroup, read the `gold_*` table definitions and gold files,
+and write query results to `athena-results/`; nothing else. Tested with the user's own key:
+
+| Attempt | Result |
+|---|---|
+| Run the dashboard (Athena queries on gold) | ✅ Works |
+| List `bronze/`, `silver/` or the bucket root | ❌ AccessDenied |
+| Download a silver file, even with its exact key | ❌ 403 |
+| Write to `gold/` | ❌ AccessDenied |
+| Query `silver_arrivals` in Athena | ❌ `TABLE_NOT_FOUND` (Glue access is limited to `gold_*`) |
+| Use the `primary` workgroup (no scan limit) | ❌ AccessDenied |
+
+The access key is created with the AWS CLI, not Terraform, so the secret never appears in the
+Terraform state. It lives only in a local CLI profile and in Streamlit's secrets.
+
+### Dashboard limitations
+
+- **Few days so far.** It shows the days collected and processed in S3; more appear as the
+  pipeline runs.
+- **New days appear within 10 minutes** of the DAG finishing, because the day list is cached.
+- **Station names** are merged by removing suffixes like " Underground Station"; a proper fix
+  needs a NaPTAN station lookup table.
+- **Cold start.** The free tier sleeps after a few days without visitors; the first visit
+  wakes it in about a minute, and the first Athena queries take about 15 seconds.
+
 ## Design decisions
 
 **Ingestion**
@@ -247,6 +313,10 @@ python -m tfl_pipeline.jobs.silver.line_status       --dt 2026-10-21
 python -m tfl_pipeline.jobs.gold.line_status_daily   --dt 2026-10-21
 python -m tfl_pipeline.jobs.gold.station_hourly      --dt 2026-10-21
 python -m tfl_pipeline.jobs.gold.line_headways       --dt 2026-10-21
+
+# 5. Open the dashboard on the local gold tables (http://localhost:8501)
+pip install -e ".[dashboard]"
+streamlit run dashboard/app.py
 ```
 
 All settings have sensible defaults and can be overridden with environment variables; see
@@ -313,7 +383,16 @@ python -m tfl_pipeline.jobs.silver.arrivals --dt 2026-10-21 --lake s3a://<bucket
 # ...or let Airflow run the whole DAG on S3 (set the same variables for airflow standalone)
 export TFL_LAKE=s3a://<bucket-name>
 airflow dags test tfl_daily 2026-10-21
+
+# 6. Dashboard on Athena with the read-only user (its access key is created once, outside Terraform)
+aws iam create-access-key --user-name "$(terraform -chdir=infra output -raw dashboard_user_name)"
+aws configure --profile tfl-dashboard      # paste the key; region eu-north-1
+AWS_PROFILE=tfl-dashboard DASHBOARD_SOURCE=athena streamlit run dashboard/app.py
 ```
+
+To deploy it, point Streamlit Community Cloud at `dashboard/app.py` on `main` and add
+`DASHBOARD_SOURCE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_DEFAULT_REGION` as
+top-level secrets. It installs only `dashboard/requirements.txt`, not the whole pipeline.
 
 `LAKE_URI` (consumer) accepts `s3://bucket[/prefix]` or a local path; Spark jobs use `s3a://`
 for S3. The first Spark run downloads the S3A connector (`hadoop-aws`, matching PySpark's
@@ -366,11 +445,14 @@ src/tfl_pipeline/
     bronze_exists.py   "is there data for this day?" (exit 99 = skip the run)
     quality.py         data quality checks for one day of silver and gold
 dags/                  Airflow DAG: tfl_daily.py
+dashboard/             Streamlit app: app.py (page), charts.py (Altair charts),
+                       data.py (local or Athena), requirements.txt (for Streamlit Cloud)
 infra/                 Terraform: S3 bucket, IAM roles (main.tf, iam.tf),
-                       Glue tables and Athena workgroup (athena.tf)
+                       Glue tables and Athena workgroup (athena.tf),
+                       read-only dashboard user (dashboard.tf)
 sql/                   example Athena queries on the gold tables
 tests/                 unit tests (conftest.py holds the shared Spark fixtures)
-docs/                  data exploration notes
+docs/                  data exploration notes, dashboard screenshots (images/)
 conf/                  log4j2.properties for quieter local Spark logs
 docker-compose.yml     local Kafka + Kafka UI
 ```
@@ -385,5 +467,5 @@ docker-compose.yml     local Kafka + Kafka UI
 | 3 | PySpark: bronze → silver → gold, Spark tests in CI, jobs running on S3 | ✅ Done |
 | 4 | Glue Data Catalog and Athena: all tables queryable with SQL, partition projection | ✅ Done |
 | 5 | Airflow orchestration: daily DAG, data quality checks, skip on missing data, backfills, DAG tests in CI | ✅ Done |
-| 6 | Streamlit dashboard (live line status, delays, busiest stations) | ⏳ Next |
-| 7 | Docker images, 24/7 deployment, CD | Planned |
+| 6 | Streamlit dashboard on Athena, deployed publicly with a read-only IAM user | ✅ Done |
+| 7 | Docker images, 24/7 deployment, CD | ⏳ Next |
