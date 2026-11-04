@@ -16,7 +16,6 @@ def get_spark(app_name: str) -> SparkSession:
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
         .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.5.0")
-        .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.5.0")
         # Credentials from the standard AWS chain (env vars, AWS_PROFILE, instance role...).
         .config(
             "spark.hadoop.fs.s3a.aws.credentials.provider",
