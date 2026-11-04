@@ -5,17 +5,29 @@ import streamlit as st
 import charts
 from data import available_days, read_gold
 
+
+# -------- Caching -------------------------------------------------------------------
+@st.cache_data(ttl=3600, show_spinner="Loading data…")
+def load(table: str, dt: str):
+    """One day of a gold table, cached for an hour per (table, dt)."""
+    return read_gold(table, dt)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def days():
+    """Days with gold data, cached for 10 minutes so new days appear soon."""
+    return available_days()
+
+
 st.set_page_config(page_title="TfL network dashboard", layout="wide")
 st.title("London rail network: one day")
 
 # --- Date picker -----------------------------------------------------------
+dt = st.selectbox("Day (UTC)", days())
 
-days = available_days()
-dt = st.selectbox("Day (UTC)", days)
-
-stations = read_gold("station_hourly", dt)
-status = read_gold("line_status_daily", dt)
-headways = read_gold("line_headways", dt)
+stations = load("station_hourly", dt)
+status = load("line_status_daily", dt)
+headways = load("line_headways", dt)
 
 # --- KPI tiles ---------------------------------------------------------------
 c1, c2, c3 = st.columns(3)

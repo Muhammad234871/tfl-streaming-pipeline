@@ -91,3 +91,18 @@ resource "aws_iam_role_policy_attachment" "spark_jobs" {
   role       = aws_iam_role.spark_jobs.name
   policy_arn = aws_iam_policy.spark_jobs.arn
 }
+
+resource "aws_iam_user" "dashboard" {
+  name = "tfl-dashboard"
+}
+
+resource "aws_iam_policy" "dashboard" {
+  name        = "tfl-dashboard"
+  description = "Policy for the TfL dashboard user"
+  policy      = data.aws_iam_policy_document.dashboard.json
+}
+
+resource "aws_iam_user_policy_attachment" "dashboard" {
+  user       = aws_iam_user.dashboard.name
+  policy_arn = aws_iam_policy.dashboard.arn
+}

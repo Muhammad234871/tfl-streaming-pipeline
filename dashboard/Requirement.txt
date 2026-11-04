@@ -1,0 +1,5 @@
+streamlit>=1.40
+altair>=5.0
+pandas>=2.2
+pyarrow>=17
+awswrangler>=3.9

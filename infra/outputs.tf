@@ -24,3 +24,9 @@ output "glue_catalog_database_name" {
   description = "Glue catalog database for the data lake; use it as GLUE_CATALOG_DATABASE"
   value       = aws_glue_catalog_database.lake.name
 }
+
+
+output "dashboard_user_name" {
+  description = "IAM user for the deployed dashboard; create its access key with the CLI"
+  value       = aws_iam_user.dashboard.name
+}
