@@ -41,6 +41,7 @@ flowchart LR
 |---|---|
 | **Producer** (`producer.py`) | Polls TfL every 60 seconds, wraps each record in an envelope (`poll_id`, `ingested_at`, `source`, `data`), and publishes it to Kafka keyed by line |
 | **Kafka** (`docker-compose.yml`) | Single-node broker in KRaft mode (no ZooKeeper), 3 partitions per topic, 72-hour retention, plus Kafka UI |
+| **Containers** (`Dockerfile`) | Two images from one Dockerfile: `stream` (producer and consumer, 24/7) and `batch` (Java 21, PySpark and the S3 connector for the Spark jobs); `docker compose up` runs the whole stream |
 | **Consumer** (`consumer.py`) | Reads both topics, buffers messages, and writes gzipped JSON Lines files to bronze, partitioned by ingestion hour |
 | **Sinks** (`sinks.py`) | Write files to the lake: an S3 bucket or a local folder, chosen by one setting (`LAKE_URI`) without changing the consumer |
 | **Spark jobs** (`jobs/silver/`, `jobs/gold/`) | Batch jobs, one day at a time: bronze → silver (clean, typed, deduplicated) → gold (aggregated answers) |
@@ -300,8 +301,9 @@ Prerequisites: Python 3.12, Docker, and Java 17+ for Spark.
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,spark]"
 
-# 2. Start Kafka (Kafka UI at http://localhost:8080)
-docker compose up -d
+# 2. Start only Kafka (Kafka UI at http://localhost:8080); `docker compose up -d` would also
+#    start the containerised producer and consumer, see "Run with Docker"
+docker compose up -d kafka kafka-ui
 
 # 3. Run the producer and consumer in two terminals (writes to data/lake/bronze/)
 python -m tfl_pipeline.producer
@@ -322,6 +324,41 @@ streamlit run dashboard/app.py
 All settings have sensible defaults and can be overridden with environment variables; see
 [`.env.example`](.env.example). A free [TfL app key](https://api-portal.tfl.gov.uk) is optional
 and raises the API rate limit. For quieter Spark logs, `export SPARK_CONF_DIR=$PWD/conf`.
+
+### Run with Docker
+
+One [`Dockerfile`](Dockerfile) builds two images, so the services that run all day stay small:
+
+| Image | Contents | Size | Used for |
+|---|---|---|---|
+| `tfl-stream` | Python 3.12 slim + the package | ~290 MB | producer and consumer, 24/7 |
+| `tfl-batch` | + Java 21, PySpark and the S3A connector | ~1.6 GB of layers | the daily Spark jobs |
+
+```bash
+# The whole stream: Kafka, Kafka UI, producer and consumer (writes to data/lake/bronze/)
+docker compose up -d --build
+docker compose logs -f producer consumer
+
+# The whole daily batch for one day, in DAG order (bronze check -> silver -> gold -> quality)
+docker build --target batch -t tfl-batch .
+docker run --rm -v "$PWD/data/lake:/data/lake" tfl-batch \
+  python -m tfl_pipeline.jobs.run_day --lake /data/lake --dt 2026-11-03
+```
+
+- **One image, two services.** The producer and consumer share `tfl-stream`; compose sets the
+  command for each and points them at Kafka's internal listener (`kafka:19092`).
+- **Restart on failure.** `restart: unless-stopped` brings both back after a crash or a Docker
+  restart. Switching from terminals to containers loses nothing: the consumer group
+  (`tfl-bronze-writer`) continues from its committed offsets.
+- **Non-root.** Containers run as user `app` (UID 1000), so files written to the mounted lake
+  belong to you, not root.
+- **No download per run.** The S3A connector (~675 MB) is downloaded while building the image,
+  before the code is copied, so code changes rebuild in seconds; Ivy's duplicate jar copies are
+  hard-linked, saving ~675 MB.
+- **`run_day` without Airflow.** [`jobs/run_day.py`](src/tfl_pipeline/jobs/run_day.py) runs the
+  seven steps as separate processes, stops at the first failure with its exit code, returns 99
+  when there is no bronze data, and defaults to yesterday (UTC). One run for a day of about a
+  million arrivals takes under 3 minutes.
 
 ### Run the batch jobs with Airflow
 
@@ -403,7 +440,7 @@ bundled Hadoop), about 675 MB, cached afterwards.
 ```bash
 ruff check .            # lint
 ruff format --check .   # formatting
-pytest -v               # 14 unit tests, including Spark transformations
+pytest -v               # 19 unit tests, including Spark transformations
 
 pytest tests/test_dags.py -v   # in the Airflow virtualenv: DAG structure tests
 
@@ -444,6 +481,7 @@ src/tfl_pipeline/
                        station_hourly.py, line_headways.py
     bronze_exists.py   "is there data for this day?" (exit 99 = skip the run)
     quality.py         data quality checks for one day of silver and gold
+    run_day.py         the whole daily batch in DAG order, without Airflow
 dags/                  Airflow DAG: tfl_daily.py
 dashboard/             Streamlit app: app.py (page), charts.py (Altair charts),
                        data.py (local or Athena), requirements.txt (for Streamlit Cloud)
@@ -454,7 +492,8 @@ sql/                   example Athena queries on the gold tables
 tests/                 unit tests (conftest.py holds the shared Spark fixtures)
 docs/                  data exploration notes, dashboard screenshots (images/)
 conf/                  log4j2.properties for quieter local Spark logs
-docker-compose.yml     local Kafka + Kafka UI
+Dockerfile             two images: stream (producer, consumer) and batch (Spark jobs)
+docker-compose.yml     Kafka, Kafka UI, producer and consumer
 ```
 
 ## Roadmap
@@ -468,4 +507,4 @@ docker-compose.yml     local Kafka + Kafka UI
 | 4 | Glue Data Catalog and Athena: all tables queryable with SQL, partition projection | ✅ Done |
 | 5 | Airflow orchestration: daily DAG, data quality checks, skip on missing data, backfills, DAG tests in CI | ✅ Done |
 | 6 | Streamlit dashboard on Athena, deployed publicly with a read-only IAM user | ✅ Done |
-| 7 | Docker images, 24/7 deployment, CD | ⏳ Next |
+| 7 | Docker images ✅, 24/7 deployment on EC2, CD | ⏳ In progress |
