@@ -8,6 +8,7 @@ dependencies = ["requests>=2.32", "confluent-kafka>=2.6", "boto3[crt]>=1.40"]
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff==0.17.0"]
 spark = ["pyspark>=4.0"]
+dashboard = ["streamlit>=1.40", "pandas>=2.2", "pyarrow>=17", "awswrangler>=3.9"]
 
 [build-system]
 requires = ["setuptools>=68"]
