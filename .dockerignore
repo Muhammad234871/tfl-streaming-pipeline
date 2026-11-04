@@ -1,0 +1,25 @@
+# Version control and tooling
+.git
+.github
+.venv
+.pytest_cache
+.ruff_cache
+**/__pycache__
+
+# Local lake: GBs, never in an image
+data/
+
+# Secrets
+.env
+
+# Terraform: state files can contain secrets
+infra/
+**/.terraform
+**/*.tfstate*
+
+# Not used by the pipeline image
+dashboard/
+docs/
+tests/
+sql/
+dags/
