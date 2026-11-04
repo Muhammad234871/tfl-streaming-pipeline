@@ -1,8 +1,8 @@
 """TfL network dashboard: one day of gold data."""
 
-import charts
 import streamlit as st
 
+import charts
 from data import available_days, read_gold
 
 st.set_page_config(page_title="TfL network dashboard", layout="wide")
