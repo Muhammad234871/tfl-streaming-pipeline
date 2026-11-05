@@ -149,7 +149,7 @@ def headways_by_line(df: pd.DataFrame) -> alt.Chart:
         alt.Chart(df)
         .mark_bar(color=BLUE, **_bar_ends(horizontal=True))
         .encode(
-            y=alt.Y("line_name:N", sort="x", title=None),
+            y=alt.Y("line_name:N", sort="x", title=None, axis=alt.Axis(labelLimit=200)),
             x=alt.X("median_headway_min:Q", title="Median minutes between trains"),
             tooltip=[
                 alt.Tooltip("line_name:N", title="Line"),
