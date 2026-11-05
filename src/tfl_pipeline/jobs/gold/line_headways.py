@@ -10,12 +10,13 @@ Usage:
 
 import argparse
 
-from pyspark.sql import DataFrame, Window
+from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 
 from tfl_pipeline.jobs.common import get_spark, read_silver, write_partitioned
 from tfl_pipeline.jobs.gold.arrival_events import arrival_events
 
+MIN_HEADWAY_S = 60  # no two trains use one platform this close; shorter is a duplicate
 MAX_HEADWAY_S = 1800  # longer gaps are treated as gaps in our data, not in the service
 
 
@@ -25,18 +26,21 @@ def headways(silver: DataFrame) -> DataFrame:
         "expected_arrival"
     )
 
-    with_prev = arrival_events(silver).withColumn(
-        "prev_arrival", F.lag("expected_arrival").over(w)
-    )
+    def seconds_since_previous() -> Column:
+        prev = F.lag("expected_arrival").over(w)
+        return F.col("expected_arrival").cast("long") - prev.cast("long")
 
-    with_gap = with_prev.withColumn(
-        "headway_s",
-        F.col("expected_arrival").cast("long") - F.col("prev_arrival").cast("long"),
-    )
+    # Pass 1: drop arrivals that come too soon after the previous one (duplicates).
+    events = arrival_events(silver).withColumn("gap_s", seconds_since_previous())
+    distinct_trains = events.where(
+        F.col("gap_s").isNull() | (F.col("gap_s") >= MIN_HEADWAY_S)
+    ).drop("gap_s")
 
+    # Pass 2: the real headways between the remaining trains.
+    with_gap = distinct_trains.withColumn("headway_s", seconds_since_previous())
     return with_gap.where(
         F.col("headway_s").isNotNull() & (F.col("headway_s") <= MAX_HEADWAY_S)
-    ).drop("prev_arrival")
+    )
 
 
 def transform(silver: DataFrame) -> DataFrame:
