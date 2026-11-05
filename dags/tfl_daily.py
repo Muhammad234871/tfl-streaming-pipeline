@@ -46,9 +46,17 @@ with DAG(
     gold_line_headways = pipeline_task("gold_line_headways", "gold.line_headways")
     check_quality = pipeline_task("check_quality", "quality", retries=0)
     check_bronze = pipeline_task("check_bronze", "bronze_exists", retries=0)
+    gold_coverage = pipeline_task(
+        "gold_collection_coverage", "gold.collection_coverage"
+    )
 
-    silver_arrivals >> [gold_station_hourly, gold_line_headways]
+    silver_arrivals >> [gold_station_hourly, gold_line_headways, gold_coverage]
     silver_line_status >> [gold_line_status_daily]
 
-    [gold_line_status_daily, gold_station_hourly, gold_line_headways] >> check_quality
+    [
+        gold_line_status_daily,
+        gold_station_hourly,
+        gold_line_headways,
+        gold_coverage,
+    ] >> check_quality
     check_bronze >> [silver_arrivals, silver_line_status]

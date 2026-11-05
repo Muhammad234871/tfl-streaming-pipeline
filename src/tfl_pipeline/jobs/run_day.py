@@ -20,6 +20,7 @@ STEPS = [
     "gold.line_status_daily",
     "gold.station_hourly",
     "gold.line_headways",
+    "gold.collection_coverage",
     "quality",
 ]
 

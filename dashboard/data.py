@@ -15,7 +15,12 @@ ATHENA_WORKGROUP = "tfl"
 
 # The only tables the dashboard may read. A table name can't be passed as a SQL
 # parameter, so it goes into the SQL text; this list makes sure it's one of ours.
-GOLD_TABLES = {"station_hourly", "line_status_daily", "line_headways"}
+GOLD_TABLES = {
+    "station_hourly",
+    "line_status_daily",
+    "line_headways",
+    "collection_coverage",
+}
 
 
 # --- Public functions: app.py only calls these ---------------------------------
