@@ -19,9 +19,9 @@ resource "aws_cloudwatch_log_metric_filter" "bronze_files_written" {
   pattern        = "\"consumer: wrote\""
 
   metric_transformation {
-    namespace = "TfL/Pipeline"
-    name      = "BronzeFilesWritten"
-    value     = "1"
+    namespace     = "TfL/Pipeline"
+    name          = "BronzeFilesWritten"
+    value         = "1"
     default_value = "0" # in case the stream instance is down and no logs are coming in, so the metric is missing
   }
 }
@@ -33,9 +33,9 @@ resource "aws_cloudwatch_log_metric_filter" "batch_succeeded" {
   pattern        = "\"steps succeeded\""
 
   metric_transformation {
-    namespace = "TfL/Pipeline"
-    name      = "BatchSucceeded"
-    value     = "1"
+    namespace     = "TfL/Pipeline"
+    name          = "BatchSucceeded"
+    value         = "1"
     default_value = "0" # in case the batch instance is down and no logs are coming in, so the metric is missing
   }
 }
