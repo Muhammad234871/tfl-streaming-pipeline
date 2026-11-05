@@ -42,3 +42,9 @@ output "stream_instance_id" {
   description = "Open a shell with: aws ssm start-session --target <id>"
   value       = aws_instance.stream.id
 }
+
+
+output "github_deploy_user_name" {
+  description = "IAM user for GitHub Actions; create its access key with the CLI and store it as GitHub secrets"
+  value       = aws_iam_user.github_deploy.name
+}
