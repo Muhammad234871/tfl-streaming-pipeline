@@ -144,18 +144,19 @@ def disruption_minutes(df: pd.DataFrame) -> alt.Chart:
 
 
 def headways_by_line(df: pd.DataFrame) -> alt.Chart:
-    """Columns: line_id, median_headway_min. Lower is a more frequent service."""
+    """Columns: line_name, median_headway_min, platform_hours. Lower is a more frequent service."""
     return (
         alt.Chart(df)
         .mark_bar(color=BLUE, **_bar_ends(horizontal=True))
         .encode(
-            y=alt.Y("line_id:N", sort="x", title=None),
+            y=alt.Y("line_name:N", sort="x", title=None),
             x=alt.X("median_headway_min:Q", title="Median minutes between trains"),
             tooltip=[
-                alt.Tooltip("line_id:N", title="Line"),
+                alt.Tooltip("line_name:N", title="Line"),
                 alt.Tooltip(
                     "median_headway_min:Q", title="Median gap (min)", format=".1f"
                 ),
+                alt.Tooltip("platform_hours:Q", title="Platform-hours measured"),
             ],
         )
         .properties(height=alt.Step(24))

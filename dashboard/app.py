@@ -19,6 +19,10 @@ def days():
     return available_days()
 
 
+MIN_TRAINS = 5  # trains in a platform-hour before its median means anything
+MIN_PLATFORM_HOURS = 10  # platform-hours a line needs before we show it
+
+
 st.set_page_config(page_title="TfL network dashboard", layout="wide")
 st.title("London rail network: one day")
 
@@ -88,13 +92,22 @@ with left:
 # --- Service frequency -------------------------------------------------------
 with right:
     st.subheader("How often trains come, by line")
+    st.caption(
+        f"Median of each platform-hour with {MIN_TRAINS}+ trains; lines with fewer "
+        f"than {MIN_PLATFORM_HOURS} such platform-hours that day are left out."
+    )
     freq = (
-        headways[headways["trains"] >= 5]
+        headways[headways["trains"] >= MIN_TRAINS]
         .groupby("line_id", as_index=False)
         .agg(
             median_headway_min=("median_headway_min", "median"),
+            platform_hours=("median_headway_min", "size"),
         )
     )
+    freq = freq[freq["platform_hours"] >= MIN_PLATFORM_HOURS]
+    names = status[["line_id", "line_name"]].drop_duplicates("line_id")
+    freq = freq.merge(names, on="line_id", how="left")
+    freq["line_name"] = freq["line_name"].fillna(freq["line_id"])
     st.altair_chart(charts.headways_by_line(freq), width="stretch")
 
 # --- Table view --------------------------------------------------------------
