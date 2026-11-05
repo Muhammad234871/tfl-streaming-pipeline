@@ -1,0 +1,71 @@
+#!/bin/bash
+# Runs once, as root, on the batch instance's first boot. It installs a systemd service
+# that runs the daily batch on EVERY boot. Log: /var/log/cloud-init-output.log
+set -euo pipefail
+
+dnf install -y docker
+systemctl enable --now docker
+
+mkdir -p /opt/tfl /etc/tfl
+
+# --- The batch script: run yesterday's batch, then shut down ---------------------
+cat > /opt/tfl/run-batch.sh <<'SCRIPT'
+#!/bin/bash
+# No "set -e": whatever happens, the machine must shut down at the end.
+set -uo pipefail
+
+MAINTENANCE=/etc/tfl/maintenance   # touch this file to keep the instance running
+
+# Safety net: if anything below hangs, stop the machine after 2 hours anyway.
+if [ ! -f "$MAINTENANCE" ]; then
+  shutdown -h +120 "tfl-batch safety shutdown"
+fi
+
+DT=$(date -u -d yesterday +%F)
+echo "tfl-batch: processing $DT"
+
+aws ecr get-login-password --region ${region} \
+  | docker login --username AWS --password-stdin ${registry}
+docker pull ${image}
+
+# local[*] Spark gets 6 of the 8 GB; the rest is for Python, Docker and the OS.
+timeout 90m docker run --rm \
+  -e AWS_REGION=${region} \
+  -e PYSPARK_SUBMIT_ARGS="--driver-memory 6g pyspark-shell" \
+  ${image} \
+  python -m tfl_pipeline.jobs.run_day --lake ${lake_uri} --dt "$DT"
+CODE=$?
+echo "tfl-batch: run_day for $DT finished with exit code $CODE"
+
+docker image prune -f   # remove old image versions so the disk doesn't fill up
+
+if [ -f "$MAINTENANCE" ]; then
+  echo "tfl-batch: maintenance mode, not shutting down"
+  shutdown -c || true
+else
+  shutdown -h now
+fi
+SCRIPT
+chmod +x /opt/tfl/run-batch.sh
+
+# --- systemd: run the script on every boot, once Docker and the network are up ---
+cat > /etc/systemd/system/tfl-batch.service <<'UNIT'
+[Unit]
+Description=TfL daily batch (run_day for yesterday, then shut down)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/tfl/run-batch.sh
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable tfl-batch.service
+# This first boot: run it now too (without waiting), as a test of the whole chain.
+systemctl start --no-block tfl-batch.service

@@ -11,7 +11,7 @@ locals {
   budget_limit_usd    = 30
   auto_stop_at_usd    = 25 # leaves a margin, as budget data lags by up to a day
   budget_period_start = "2026-11-01_00:00"
-  instances_to_stop   = [aws_instance.stream.id]
+  instances_to_stop   = [aws_instance.stream.id, aws_instance.batch.id]
 }
 
 resource "aws_budgets_budget" "project" {
@@ -91,6 +91,48 @@ resource "aws_budgets_budget_action" "stop_instances" {
       action_sub_type = "STOP_EC2_INSTANCES"
       region          = data.aws_region.current.region
       instance_ids    = local.instances_to_stop
+    }
+  }
+
+  subscriber {
+    address           = var.alert_email
+    subscription_type = "EMAIL"
+  }
+}
+
+
+# At $25, also stop the nightly schedule from starting the batch instance again:
+# attach a policy that denies ec2:StartInstances to the scheduler's role.
+data "aws_iam_policy_document" "deny_start" {
+  statement {
+    effect    = "Deny"
+    actions   = ["ec2:StartInstances"]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_policy" "deny_start" {
+  name        = "tfl-deny-start-instances"
+  description = "Attached by the budget action at $25 so nothing starts the instances again"
+  policy      = data.aws_iam_policy_document.deny_start.json
+}
+
+resource "aws_budgets_budget_action" "block_schedule" {
+  budget_name        = aws_budgets_budget.project.name
+  action_type        = "APPLY_IAM_POLICY"
+  approval_model     = "AUTOMATIC"
+  notification_type  = "ACTUAL"
+  execution_role_arn = aws_iam_role.budget_action.arn
+
+  action_threshold {
+    action_threshold_type  = "ABSOLUTE_VALUE"
+    action_threshold_value = local.auto_stop_at_usd
+  }
+
+  definition {
+    iam_action_definition {
+      policy_arn = aws_iam_policy.deny_start.arn
+      roles      = [aws_iam_role.scheduler.name]
     }
   }
 
