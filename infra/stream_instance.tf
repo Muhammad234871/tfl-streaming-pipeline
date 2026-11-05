@@ -44,10 +44,11 @@ resource "aws_instance" "stream" {
   }
 
   user_data = templatefile("${path.module}/templates/stream_user_data.sh.tftpl", {
-    region   = data.aws_region.current.region
-    registry = split("/", aws_ecr_repository.images["tfl-stream"].repository_url)[0]
-    image    = "${aws_ecr_repository.images["tfl-stream"].repository_url}:latest"
-    lake_uri = "s3://${aws_s3_bucket.lake.bucket}"
+    region    = data.aws_region.current.region
+    registry  = split("/", aws_ecr_repository.images["tfl-stream"].repository_url)[0]
+    image     = "${aws_ecr_repository.images["tfl-stream"].repository_url}:latest"
+    lake_uri  = "s3://${aws_s3_bucket.lake.bucket}"
+    log_group = aws_cloudwatch_log_group.instance["stream"].name
   })
   # A changed start-up script only runs on a new instance, so replace it on change.
   user_data_replace_on_change = true

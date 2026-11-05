@@ -36,10 +36,11 @@ resource "aws_instance" "batch" {
   }
 
   user_data = templatefile("${path.module}/templates/batch_user_data.sh.tftpl", {
-    region   = data.aws_region.current.region
-    registry = split("/", aws_ecr_repository.images["tfl-batch"].repository_url)[0]
-    image    = "${aws_ecr_repository.images["tfl-batch"].repository_url}:latest"
-    lake_uri = "s3a://${aws_s3_bucket.lake.bucket}"
+    region    = data.aws_region.current.region
+    registry  = split("/", aws_ecr_repository.images["tfl-batch"].repository_url)[0]
+    image     = "${aws_ecr_repository.images["tfl-batch"].repository_url}:latest"
+    lake_uri  = "s3a://${aws_s3_bucket.lake.bucket}"
+    log_group = aws_cloudwatch_log_group.instance["batch"].name
   })
   user_data_replace_on_change = true
 

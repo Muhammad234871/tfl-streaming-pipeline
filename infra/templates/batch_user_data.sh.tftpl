@@ -28,8 +28,13 @@ aws ecr get-login-password --region ${region} \
   | docker login --username AWS --password-stdin ${registry}
 docker pull ${image}
 
-# local[*] Spark gets 6 of the 8 GB; the rest is for Python, Docker and the OS.
+# Logs go to CloudWatch (/tfl/batch), one stream per day, so they can be read after
+# the machine has shut down.
 timeout 90m docker run --rm \
+  --log-driver awslogs \
+  --log-opt awslogs-region=${region} \
+  --log-opt awslogs-group=${log_group} \
+  --log-opt awslogs-stream="run-$DT" \
   -e AWS_REGION=${region} \
   -e PYSPARK_SUBMIT_ARGS="--driver-memory 6g pyspark-shell" \
   ${image} \

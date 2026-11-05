@@ -19,12 +19,16 @@ aws ecr get-login-password --region ${region} \
 # --- The production stack ---------------------------------------------------------
 mkdir -p /opt/tfl
 cat > /opt/tfl/docker-compose.yml <<'COMPOSE'
-# Keep each container's logs to 3 x 10 MB, so a 24/7 service never fills the disk.
+# Send each container's logs to CloudWatch Logs, one stream per container. Non-blocking:
+# if CloudWatch is slow, log lines are buffered (or dropped) instead of pausing the app.
 x-logging: &logging
-  driver: json-file
+  driver: awslogs
   options:
-    max-size: "10m"
-    max-file: "3"
+    awslogs-region: ${region}
+    awslogs-group: ${log_group}
+    tag: "{{.Name}}"
+    mode: non-blocking
+    max-buffer-size: 4m # --- buffer up to 4 MB of logs before dropping lines -------------------------------------
 
 services:
   kafka:

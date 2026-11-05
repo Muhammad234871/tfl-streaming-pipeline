@@ -82,3 +82,23 @@ resource "aws_iam_instance_profile" "instance" {
   name = aws_iam_role.instance[each.key].name # the same name as the role
   role = aws_iam_role.instance[each.key].name # the role's name
 }
+
+data "aws_iam_policy_document" "write_logs" {
+  for_each = local.instances
+
+  statement {
+    actions = [
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+    ]
+    resources = ["${aws_cloudwatch_log_group.instance[each.key].arn}:*"] # the log group for this instance
+  }
+}
+
+resource "aws_iam_role_policy" "write_logs" {
+  for_each = local.instances
+
+  name   = "write-logs-${each.key}"
+  role   = aws_iam_role.instance[each.key].id
+  policy = data.aws_iam_policy_document.write_logs[each.key].json
+}
