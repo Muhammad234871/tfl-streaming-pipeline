@@ -2,15 +2,20 @@
 
 [![CI](https://github.com/Muhammad234871/tfl-streaming-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/Muhammad234871/tfl-streaming-pipeline/actions/workflows/ci.yml)
 
-A data pipeline for London transport. It streams live train arrival predictions and line
-disruptions for the Tube, DLR, Elizabeth line and Overground from the
+A data pipeline for London transport, running 24/7 on AWS. It streams live train arrival
+predictions and line disruptions for the Tube, DLR, Elizabeth line and Overground from the
 [TfL Unified API](https://api.tfl.gov.uk) through **Kafka** into an **S3 data lake**, then uses
 **PySpark** to turn the raw data into clean **silver** tables and analytics-ready **gold** tables
-(delay minutes per line, busiest stations, time between trains). **Apache Airflow** runs the
-batch jobs every day in dependency order, with retries, backfills and data quality checks. Every
-table is registered in the **AWS Glue Data Catalog** and can be queried with plain SQL in
-**Amazon Athena**. A public **Streamlit** dashboard reads the gold tables through Athena with a
-read-only IAM user. The AWS infrastructure is provisioned by **Terraform**.
+(delay minutes per line, busiest stations, time between trains, data coverage). Every table is
+registered in the **AWS Glue Data Catalog** and can be queried with plain SQL in **Amazon
+Athena**, and a public **Streamlit** dashboard reads the gold tables through Athena.
+
+In production the stream runs in **Docker** on an always-on **EC2** instance, and a second
+instance is started every night by **EventBridge Scheduler**, runs the daily Spark batch and
+shuts itself down. **CloudWatch** alarms e-mail when data stops arriving or the batch fails, an
+**AWS Budgets** action caps the cost, and every merge to `main` is built, pushed to **ECR** and
+deployed by **GitHub Actions**. **Apache Airflow** orchestrates the same batch locally, with
+backfills. All AWS infrastructure is provisioned by **Terraform**.
 
 **Live dashboard:** [tfl-london-network.streamlit.app](https://tfl-london-network.streamlit.app/)
 
@@ -22,33 +27,40 @@ becomes 18.6 MiB of silver Parquet and a few kilobytes of gold.
 
 ```mermaid
 flowchart LR
-    A[TfL Unified API] -->|poll every 60s| B[Python producer]
-    B --> C[(Kafka<br/>tfl.arrivals.raw<br/>tfl.line-status.raw)]
-    C --> D[Python consumer]
+    A[TfL Unified API] -->|poll every 60s| B[producer]
+    subgraph EC2 stream instance - 24/7
+      B --> C[(Kafka)]
+      C --> D[consumer]
+    end
     D -->|gzipped JSON Lines| E[(S3 bronze)]
-    E -->|PySpark| F[(S3 silver<br/>Parquet)]
-    F -->|PySpark| G[(S3 gold<br/>Parquet)]
+    subgraph EC2 batch instance - nightly
+      R[run_day: Spark jobs<br/>+ quality checks]
+    end
+    S[EventBridge Scheduler<br/>01:00 UTC] -.->|start| R
+    E --> R
+    R --> F[(S3 silver<br/>Parquet)]
+    R --> G[(S3 gold<br/>Parquet)]
     F --> K[Glue Data Catalog<br/>tfl_lake]
     G --> K
     K --> H[Athena SQL]
-    W[Airflow DAG<br/>tfl_daily] -.->|schedules + checks| F
-    W -.-> G
-    T[Terraform] -.->|bucket, IAM roles,<br/>catalog, workgroup| E
-    H -->|read-only IAM user| I[Streamlit dashboard<br/>Community Cloud]
+    H -->|read-only IAM user| I[Streamlit dashboard]
+    D -. logs .-> M[CloudWatch<br/>alarms → e-mail]
+    R -. logs .-> M
 ```
 
 | Component | What it does |
 |---|---|
 | **Producer** (`producer.py`) | Polls TfL every 60 seconds, wraps each record in an envelope (`poll_id`, `ingested_at`, `source`, `data`), and publishes it to Kafka keyed by line |
-| **Kafka** (`docker-compose.yml`) | Single-node broker in KRaft mode (no ZooKeeper), 3 partitions per topic, 72-hour retention, plus Kafka UI |
-| **Containers** (`Dockerfile`) | Two images from one Dockerfile: `stream` (producer and consumer, 24/7) and `batch` (Java 21, PySpark and the S3 connector for the Spark jobs); `docker compose up` runs the whole stream |
+| **Kafka** | Single-node broker in KRaft mode (no ZooKeeper), 3 partitions per topic, 72-hour retention: the buffer between collection and storage |
 | **Consumer** (`consumer.py`) | Reads both topics, buffers messages, and writes gzipped JSON Lines files to bronze, partitioned by ingestion hour |
 | **Sinks** (`sinks.py`) | Write files to the lake: an S3 bucket or a local folder, chosen by one setting (`LAKE_URI`) without changing the consumer |
 | **Spark jobs** (`jobs/silver/`, `jobs/gold/`) | Batch jobs, one day at a time: bronze → silver (clean, typed, deduplicated) → gold (aggregated answers) |
-| **Orchestration** (`dags/tfl_daily.py`) | Airflow DAG that, once a day, checks bronze exists, runs the five Spark jobs in dependency order and finishes with data quality checks |
+| **Daily batch** (`jobs/run_day.py`, `dags/tfl_daily.py`) | Checks bronze exists, runs the six Spark jobs in dependency order and finishes with data quality checks: as one command on EC2, or as an Airflow DAG locally |
 | **Catalog and SQL** (`infra/athena.tf`, `sql/`) | Glue database `tfl_lake` with all silver and gold tables (partition projection on `dt`), and an Athena workgroup with a 1 GB per-query scan limit |
-| **Dashboard** (`dashboard/`) | Streamlit app with Altair charts: disruptions by line, arrivals per hour, busiest stations, service frequency. Reads local Parquet or Athena, chosen by one setting |
-| **Infrastructure** (`infra/`) | Terraform for the S3 bucket (private, tagged, raw bronze expires after 30 days, query results after 7), two least-privilege IAM roles (consumer and Spark jobs), a read-only IAM user for the dashboard, and the catalog and workgroup |
+| **Dashboard** (`dashboard/`) | Streamlit app with Altair charts: disruptions by line, arrivals per hour with data coverage, busiest stations, service frequency. Reads local Parquet or Athena, chosen by one setting |
+| **Containers** (`Dockerfile`) | Two images from one Dockerfile: `stream` (producer and consumer) and `batch` (Java 21, PySpark and the S3 connector) |
+| **Production** (`infra/`) | Terraform for everything on AWS: S3, IAM, Glue, Athena, ECR, both EC2 instances, the nightly schedule, CloudWatch logs and alarms, SNS, and the cost budget |
+| **CI/CD** (`.github/workflows/ci.yml`) | Lint, unit tests, DAG tests and Terraform checks on every pull request; on merge to `main`, build and push both images and redeploy the stream |
 
 ## Data model (medallion architecture)
 
@@ -82,6 +94,7 @@ about 7% of the rows. See [docs/data_exploration.md](docs/data_exploration.md).
 | `gold/line_status_daily` | line × day × status | `status_minutes`, `observed_minutes`, `pct_of_observed` | How many minutes was each line delayed or suspended? |
 | `gold/station_hourly` | station × day × hour | `train_arrivals`, `line_count`, `lines` | Which stations are busiest, and when? |
 | `gold/line_headways` | line × station × platform × day × hour | `trains`, `avg_headway_min`, `median_headway_min`, `max_headway_min` | How often do trains really come, and where are the long gaps? |
+| `gold/collection_coverage` | day × hour (always 24 rows) | `polls`, `coverage_pct` | How much of each hour did the pipeline actually collect? |
 
 ### Modelling rules and caveats
 
@@ -89,32 +102,35 @@ Gold tables rest on a few explicit modelling choices:
 
 | Rule | Value | Where |
 |---|---|---|
-| One poll ≈ one minute of observation | poll interval 60 s | `line_status_daily` |
+| One poll ≈ one minute of observation | poll interval 60 s | `line_status_daily`, `collection_coverage` |
 | A prediction this close counts as the train **arriving** | ≤ 60 s | `jobs/gold/arrival_events.py` |
 | Sightings of the same train at the same platform closer than this are **one arrival** | 10 min | `jobs/gold/arrival_events.py` |
+| Two arrivals at one platform closer than this are **the same train reported twice** | 60 s | `jobs/gold/line_headways.py` |
 | Gaps longer than this are **gaps in data collection**, not in the service | 30 min | `jobs/gold/line_headways.py` |
 
+- **Duplicate "ghost" trains.** The TfL feed sometimes lists several trains at one platform
+  seconds apart (for example five Liberty line "trains" at Romford within 6 seconds). They
+  affected 1.8% of headways and produced impossible 0-minute medians. No two trains can use a
+  platform less than 60 seconds apart (the tightest real service, the Victoria line, is about
+  100 seconds), so these are merged before headways are computed; 0-minute medians went from
+  44 to 0.
+- **Gaps are not "no trains".** `collection_coverage` counts polls per hour (60 = complete),
+  always with 24 rows per day so that hours with no data exist too. The dashboard greys out
+  hours below 90% coverage, so a collection gap is never read as a quiet hour on the network.
 - Trains without a `vehicle_id` (mostly the DLR) are identified by destination + prediction ID.
-- Results describe the time the pipeline was collecting: `observed_minutes` makes that explicit
-  for line status, and partially collected hours show fewer trains than really ran.
 - A line with several simultaneous statuses can exceed 100% across its statuses.
 - The median uses `percentile_approx`, which returns a real data value rather than an
   interpolated one.
 
 ### Known limitations
 
-Found by sense-checking the gold tables in Athena against how the network really runs:
-
 - **Low-frequency services sit at the 30-minute limit.** Some Elizabeth line stations west of
-  London have a real 30-minute off-peak service, and several Tube gaps land just under 30
-  minutes, so genuine long gaps may be dropped as "collection gaps". A per-line limit, or
-  checking whether polls were actually missing during the gap, would be more accurate.
-- **Occasional double counting.** A few platforms show a median headway of 0 minutes, which is
-  physically impossible: trains without a `vehicle_id` can get a new prediction ID between
-  polls and be counted as two arrivals. Merging events at the same platform within a minute or
-  two would fix it.
-- **Partial days and hours.** Collection has not yet run for a full 24 hours, so totals cover
-  only the observed time.
+  London have a real 30-minute off-peak service, so genuine long gaps may be dropped as
+  "collection gaps". Checking coverage for the hours around a gap would be more accurate.
+- **Day boundary.** `dt` is the ingestion date while `hour` in the arrival tables comes from the
+  predicted arrival time, so a few arrivals just after midnight appear in the previous day.
+- **Station names** are merged by removing suffixes like " Underground Station"; a proper fix
+  needs a NaPTAN station lookup table.
 
 ## Query with SQL (Athena)
 
@@ -125,7 +141,7 @@ can be queried in Athena using the **`tfl`** workgroup (results are written to
 | Table | Source |
 |---|---|
 | `silver_arrivals`, `silver_line_status` | `silver/<table>/dt=…/` |
-| `gold_line_status_daily`, `gold_station_hourly`, `gold_line_headways` | `gold/<table>/dt=…/` |
+| `gold_line_status_daily`, `gold_station_hourly`, `gold_line_headways`, `gold_collection_coverage` | `gold/<table>/dt=…/` |
 
 Tables use **partition projection** on `dt`: Athena computes the partitions from the folder
 pattern, so new days are queryable immediately, with no crawler or `MSCK REPAIR TABLE`.
@@ -144,10 +160,86 @@ Example queries live in [`sql/`](sql/):
 A gold-table query scans only kilobytes (for example 0.87 KB in about 0.4 seconds), so it costs
 a tiny fraction of a cent.
 
+## Running in production (AWS)
+
+| | Stream instance | Batch instance |
+|---|---|---|
+| Type | t3.small (2 GB), always on | m7i-flex.large (8 GB), ~10 minutes a night |
+| Runs | Kafka, producer and consumer (Docker Compose) | `run_day` for yesterday, then `shutdown` |
+| Started by | its start-up script on first boot; Docker restarts containers after a crash or reboot | EventBridge Scheduler at 01:00 UTC; a systemd service runs the batch on every boot |
+| IAM role | write `bronze/` only, pull its own image, write its own logs | read all layers, write `silver/` and `gold/`, pull its own image, write its own logs |
+
+Always-on compute is used only where data would otherwise be lost (live predictions can't be
+fetched again later); the batch can wait and catch up, so it runs on a machine that exists for
+minutes a day.
+
+- **No access keys on the instances.** Both get temporary credentials from their **instance
+  role** through the metadata service (IMDSv2 only, hop limit 2 so containers can reach it).
+- **No inbound access.** Neither instance has an inbound security-group rule or SSH key;
+  shell access goes through **SSM Session Manager**.
+- **Unattended operation.** Containers restart on failure; Kafka's heap is sized for a 2 GB
+  machine; Docker logs go to CloudWatch instead of filling the disk.
+- **The batch always shuts down.** The machine stops itself after the run whether it succeeds,
+  fails or finds no data; `timeout 90m` and a safety shutdown after 2 hours cover hangs. A
+  maintenance flag (`/etc/tfl/maintenance`) keeps it running for debugging.
+- **Enough memory for Spark.** `--driver-memory 6g` gives local-mode Spark most of the 8 GB;
+  the default of 1 GB would fail on a full day.
+
+### Monitoring
+
+Container output goes to **CloudWatch Logs** (`/tfl/stream`, and `/tfl/batch` with one stream
+per night, readable after the batch machine has shut down; 14-day retention). Metric filters
+turn log lines into metrics without code changes, and alarms e-mail through **SNS**:
+
+| Alarm | Fires when | Based on |
+|---|---|---|
+| `tfl-no-bronze-data` | no bronze file is written for 15 minutes | count of `consumer: wrote` lines |
+| `tfl-batch-not-succeeded` | no successful batch in 26 hours (failed run, instance not started, or no data) | count of `steps succeeded` lines |
+| `tfl-stream-recover` | the stream instance fails its hardware status check; it is **recovered automatically** | EC2 `StatusCheckFailed_System` |
+
+The alarms were tested with a deliberate incident: stopping the consumer. The first test found
+a real gap: a metric filter publishes nothing when nothing matches, and the alarm stayed OK for
+over 30 minutes. With `default_value = 0`, the producer's and Kafka's log lines publish real
+zeros; on the rerun the alarm e-mail arrived within minutes. After restarting the consumer it
+caught up from its committed offsets (Kafka had kept everything), so the incident lost no data,
+and the OK e-mail followed.
+
+### Continuous deployment
+
+On every merge to `main`, after all checks pass, the `deploy` job in GitHub Actions:
+
+1. builds both images (with a GitHub Actions layer cache, so only changed layers are rebuilt),
+2. pushes them to **ECR** tagged with the commit hash (what is running, and a way to roll back)
+   and `latest`,
+3. redeploys the stream instance through SSM: `docker compose pull` and `up -d` recreate only
+   the producer and consumer, Kafka keeps running, and the consumer flushes its buffer on
+   shutdown.
+
+The batch instance needs no deploy step: it pulls `latest` at the start of every nightly run.
+ECR scans every image on push. Terraform is applied by hand after reviewing the plan.
+
+GitHub authenticates with a deploy-only IAM user whose key is an encrypted GitHub secret and
+can only push the two images and send commands to the stream instance. Keyless OIDC would be
+preferable; this account's organisation policy doesn't allow creating an OIDC provider.
+
+### Cost
+
+| Item | Per month |
+|---|---|
+| Stream instance (t3.small, 24/7) + public IPv4 + 20 GB disk | ~$21 |
+| Batch instance (~10 min/day) + 30 GB disk | ~$3 |
+| S3, Athena, ECR, CloudWatch, SNS | ~$1.50 |
+| **Total** | **~$25** |
+
+An **AWS budget** in Terraform tracks real usage (credits excluded) against a $30 project
+limit, e-mails at 50% and 80%, and at $25 an **AWS Budgets action** automatically stops both
+instances and attaches a deny policy to the scheduler's role, so nothing can start again.
+
 ## Orchestration (Airflow)
 
-The `tfl_daily` DAG ([`dags/tfl_daily.py`](dags/tfl_daily.py)) runs once a day for the day that
-has just ended. Each task runs one job with `--dt {{ ds }}` (the run's logical date):
+The `tfl_daily` DAG ([`dags/tfl_daily.py`](dags/tfl_daily.py)) runs the same daily batch
+locally, with Airflow's UI, retries and backfills. Each task runs one job with `--dt {{ ds }}`
+(the run's logical date):
 
 ```mermaid
 flowchart LR
@@ -155,9 +247,11 @@ flowchart LR
     B --> SL[silver_line_status]
     SA --> GS[gold_station_hourly]
     SA --> GH[gold_line_headways]
+    SA --> GC[gold_collection_coverage]
     SL --> GL[gold_line_status_daily]
     GS --> Q[check_quality]
     GH --> Q
+    GC --> Q
     GL --> Q
 ```
 
@@ -175,8 +269,9 @@ was collected that day, **red** = a real problem to investigate.
 - **Local or cloud.** The same DAG runs on the local lake or on S3, chosen by environment
   (`TFL_LAKE=s3a://<bucket>` and `AWS_PROFILE=tfl-spark-process`); tasks then use the
   least-privilege Spark role.
-- **Sized for a laptop.** `max_active_runs=1` and `max_active_tasks=1` keep it to one Spark job
-  at a time; on a cluster the two gold branches could run in parallel.
+- **Why not Airflow in production.** One nightly job doesn't justify a server running 24/7;
+  [`run_day`](src/tfl_pipeline/jobs/run_day.py) runs the same steps in the same order on the
+  scheduled batch instance for a fraction of the cost.
 - **Isolated environments.** Airflow runs in its own virtualenv (installed with the official
   constraints file); tasks call the project's virtualenv, so their dependencies never clash.
 
@@ -185,17 +280,17 @@ was collected that day, **red** = a real problem to investigate.
 **Live:** [tfl-london-network.streamlit.app](https://tfl-london-network.streamlit.app/), hosted on Streamlit Community Cloud ([`dashboard/app.py`](dashboard/app.py)).
 
 ![Dashboard overview: KPI tiles and minutes in a non-good status per line](docs/images/dashboard-overview.png)
-![Dashboard detail: train arrivals per hour, busiest stations, time between trains](docs/images/dashboard-detail.png)
+![Dashboard detail: train arrivals per hour with coverage, busiest stations, time between trains](docs/images/dashboard-detail.png)
 
 Pick a day and the page shows that day's gold data:
 
 | Section | Gold table | What it answers |
 |---|---|---|
-| KPI tiles | all three | Train arrivals, stations served, lines with a disruption |
+| KPI tiles | all four | Train arrivals, stations served, lines with a disruption, hours of data collected |
 | Non-good status by line | `line_status_daily` | Which lines were disrupted, how badly and for how long (overnight closures left out) |
-| Arrivals per hour | `station_hourly` | The shape of the day: overnight closure, morning peak |
+| Arrivals per hour | `station_hourly` + `collection_coverage` | The shape of the day; hours not fully collected are greyed out |
 | Busiest stations | `station_hourly` | Most train arrivals; a station's Tube, rail and Elizabeth line entries are merged by name |
-| Time between trains | `line_headways` | Median minutes between trains per line (platform-hours with 5+ trains) |
+| Time between trains | `line_headways` | Median minutes between trains per line (platform-hours with 5+ trains; lines with fewer than 10 such platform-hours are left out) |
 
 **How it gets data** ([`dashboard/data.py`](dashboard/data.py)):
 
@@ -234,13 +329,11 @@ Terraform state. It lives only in a local CLI profile and in Streamlit's secrets
 
 ### Dashboard limitations
 
-- **Few days so far.** It shows the days collected and processed in S3; more appear as the
-  pipeline runs.
-- **New days appear within 10 minutes** of the DAG finishing, because the day list is cached.
-- **Station names** are merged by removing suffixes like " Underground Station"; a proper fix
-  needs a NaPTAN station lookup table.
+- **New days appear within 10 minutes** of the batch finishing, because the day list is cached.
 - **Cold start.** The free tier sleeps after a few days without visitors; the first visit
   wakes it in about a minute, and the first Athena queries take about 15 seconds.
+- **After changing `data.py` or `charts.py`**, reboot the app on Streamlit Cloud: a rerun can
+  keep the previously imported modules.
 
 ## Design decisions
 
@@ -258,15 +351,18 @@ Terraform state. It lives only in a local CLI profile and in Streamlit's secrets
   UTC avoids broken hours when London changes between GMT and BST.
 - **Kafka key = `lineId`.** All events for a line go to the same partition, in order.
 - **Batched files, not one file per message.** Messages are flushed every 50,000 records or
-  5 minutes, which avoids the small-files problem in Spark and Athena.
+  5 minutes, which avoids the small-files problem in Spark and Athena; after an outage the
+  record limit drains the backlog quickly.
 - **Fault isolation and graceful shutdown.** If one transport mode fails the others are still
   collected; TfL rate limits and server errors are retried with backoff. On SIGINT/SIGTERM the
-  producer flushes and the consumer writes and commits its remaining buffer.
+  producer flushes and the consumer writes and commits its remaining buffer, which also makes
+  deploys and instance replacements nearly lossless.
 
 **Batch processing (Spark)**
 - **Idempotent jobs.** Each job processes one day (`--dt`) and writes with dynamic partition
   overwrite: re-running a day replaces only that day's partition, so retries and backfills are
-  safe and other days are never touched.
+  safe and other days are never touched. The same day processed on a laptop and on EC2 gives
+  identical results.
 - **Partition pruning.** Jobs read the dataset root and filter on `dt`, so Spark opens only
   that day's files while keeping `dt` as a column.
 - **Schema contract.** Silver selects columns explicitly instead of `data.*`, so a new field in
@@ -278,19 +374,19 @@ Terraform state. It lives only in a local CLI profile and in Streamlit's secrets
   separate from reading and writing, and is unit-tested with tiny DataFrames.
 
 **Infrastructure and security**
-- **Infrastructure as code.** The bucket, IAM roles, Glue tables and Athena workgroup are
-  created by Terraform, never by hand: public access is blocked, every resource is tagged, and
-  lifecycle rules delete raw bronze after 30 days and query results after 7 (silver and gold
-  are kept). Refactoring the first Glue table into `for_each` used a `moved` block, so nothing
-  was destroyed.
-- **Cost guardrails.** Athena queries are capped at 1 GB scanned each, and Parquet plus
-  partition projection keep typical queries to kilobytes.
-- **Least privilege per layer.** The consumer role can only `s3:PutObject` under `bronze/`.
-  The Spark role can read all layers and write/delete only `silver/` and `gold/`, so batch
-  jobs cannot modify raw data. Both were verified with negative tests (denied writes,
-  listing and deletes).
-- **No long-lived AWS keys.** Local development uses `aws login` (temporary credentials, up to
-  12 hours) and roles are *assumed*; nothing secret is stored in the repo.
+- **Infrastructure as code.** Everything on AWS is created by Terraform, never by hand: public
+  access to the bucket is blocked, every resource is tagged, and lifecycle rules delete raw
+  bronze after 30 days, query results after 7 days and all but the last 3 images in ECR.
+  Shared settings live in `for_each` maps, so a new table or instance is one map entry.
+- **Least privilege per component.** The consumer can only `s3:PutObject` under `bronze/`; the
+  Spark jobs can write and delete only `silver/` and `gold/`; the dashboard can only read gold;
+  the deploy user can only push two images and redeploy the stream; each instance can only pull
+  its own image and write its own logs. Permissions were verified with negative tests.
+- **No long-lived keys where avoidable.** Local development uses `aws login` (temporary
+  credentials) and assumed roles; the instances use instance roles. The two keys that must
+  exist (dashboard and deploy) are created with the CLI, never in Terraform state or the repo.
+- **Cost guardrails.** Athena queries are capped at 1 GB scanned, the batch machine runs for
+  minutes a day, and the budget action stops everything before the project limit.
 
 ## Run it locally
 
@@ -309,12 +405,8 @@ docker compose up -d kafka kafka-ui
 python -m tfl_pipeline.producer
 FLUSH_MAX_SECONDS=60 python -m tfl_pipeline.consumer
 
-# 4. Build silver, then gold, for one day
-python -m tfl_pipeline.jobs.silver.arrivals          --dt 2026-10-21
-python -m tfl_pipeline.jobs.silver.line_status       --dt 2026-10-21
-python -m tfl_pipeline.jobs.gold.line_status_daily   --dt 2026-10-21
-python -m tfl_pipeline.jobs.gold.station_hourly      --dt 2026-10-21
-python -m tfl_pipeline.jobs.gold.line_headways       --dt 2026-10-21
+# 4. Run the whole daily batch for one day (bronze check -> silver -> gold -> quality)
+python -m tfl_pipeline.jobs.run_day --dt 2026-11-04
 
 # 5. Open the dashboard on the local gold tables (http://localhost:8501)
 pip install -e ".[dashboard]"
@@ -331,34 +423,30 @@ One [`Dockerfile`](Dockerfile) builds two images, so the services that run all d
 
 | Image | Contents | Size | Used for |
 |---|---|---|---|
-| `tfl-stream` | Python 3.12 slim + the package | ~290 MB | producer and consumer, 24/7 |
-| `tfl-batch` | + Java 21, PySpark and the S3A connector | ~1.6 GB of layers | the daily Spark jobs |
+| `tfl-stream` | Python 3.12 slim + the package | ~75 MB compressed | producer and consumer, 24/7 |
+| `tfl-batch` | + Java 21, PySpark and the S3A connector | ~1.2 GB compressed | the daily Spark jobs |
 
 ```bash
 # The whole stream: Kafka, Kafka UI, producer and consumer (writes to data/lake/bronze/)
 docker compose up -d --build
 docker compose logs -f producer consumer
 
-# The whole daily batch for one day, in DAG order (bronze check -> silver -> gold -> quality)
+# The whole daily batch for one day
 docker build --target batch -t tfl-batch .
 docker run --rm -v "$PWD/data/lake:/data/lake" tfl-batch \
-  python -m tfl_pipeline.jobs.run_day --lake /data/lake --dt 2026-11-03
+  python -m tfl_pipeline.jobs.run_day --lake /data/lake --dt 2026-11-04
 ```
 
 - **One image, two services.** The producer and consumer share `tfl-stream`; compose sets the
   command for each and points them at Kafka's internal listener (`kafka:19092`).
-- **Restart on failure.** `restart: unless-stopped` brings both back after a crash or a Docker
-  restart. Switching from terminals to containers loses nothing: the consumer group
-  (`tfl-bronze-writer`) continues from its committed offsets.
 - **Non-root.** Containers run as user `app` (UID 1000), so files written to the mounted lake
   belong to you, not root.
 - **No download per run.** The S3A connector (~675 MB) is downloaded while building the image,
   before the code is copied, so code changes rebuild in seconds; Ivy's duplicate jar copies are
   hard-linked, saving ~675 MB.
 - **`run_day` without Airflow.** [`jobs/run_day.py`](src/tfl_pipeline/jobs/run_day.py) runs the
-  seven steps as separate processes, stops at the first failure with its exit code, returns 99
-  when there is no bronze data, and defaults to yesterday (UTC). One run for a day of about a
-  million arrivals takes under 3 minutes.
+  eight steps as separate processes, stops at the first failure with its exit code, returns 99
+  when there is no bronze data, and defaults to yesterday (UTC).
 
 ### Run the batch jobs with Airflow
 
@@ -380,79 +468,67 @@ airflow standalone                       # UI at http://localhost:8081 (admin pa
 airflow dags test tfl_daily 2026-10-21   # in another terminal: run one day end to end
 ```
 
-## Run against AWS
+## Deploy to AWS
 
 Prerequisites: an AWS account, [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
-v2.32+ and [Terraform](https://developer.hashicorp.com/terraform/install) 1.16+.
+v2.32+ with the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html),
+and [Terraform](https://developer.hashicorp.com/terraform/install) 1.16+.
 
 ```bash
 # 1. Sign in (temporary credentials, no access keys)
 aws login --remote
 
-# 2. Create the bucket, the two IAM roles, the Glue catalog and the Athena workgroup
-cd infra
-terraform init
-terraform plan     # always review the plan before applying
-terraform apply
-terraform output   # bucket name, role ARNs, Athena workgroup, Glue database
+# 2. Set the e-mail address for alarms and budget alerts (this file is not committed)
+echo 'alert_email = "you@example.com"' > infra/terraform.tfvars
 
-# 3. CLI profiles that assume the least-privilege roles
-aws configure set role_arn "$(terraform output -raw consumer_role_arn)" --profile tfl-consumer
-aws configure set source_profile default --profile tfl-consumer
-aws configure set region eu-north-1 --profile tfl-consumer
+# 3. Create everything: lake, catalog, ECR, IAM, both instances, schedule, monitoring, budget
+terraform -chdir=infra init
+terraform -chdir=infra plan     # always review the plan before applying
+terraform -chdir=infra apply
+#    then confirm the two subscription e-mails from AWS (alarms and budget action)
 
-aws configure set role_arn "$(terraform output -raw spark_jobs_role_arn)" --profile tfl-spark
-aws configure set source_profile default --profile tfl-spark
-aws configure set region eu-north-1 --profile tfl-spark
-# Spark's Java SDK reads the role's credentials through the CLI:
-aws configure set credential_process "aws configure export-credentials --profile tfl-spark --format process" --profile tfl-spark-process
-aws configure set region eu-north-1 --profile tfl-spark-process
-cd ..
+# 4. Push the images once (afterwards CD does this on every merge to main)
+REGISTRY=<account-id>.dkr.ecr.eu-north-1.amazonaws.com
+aws ecr get-login-password --region eu-north-1 | docker login --username AWS --password-stdin $REGISTRY
+docker build --provenance=false --target stream -t $REGISTRY/tfl-stream:latest . && docker push $REGISTRY/tfl-stream:latest
+docker build --provenance=false --target batch  -t $REGISTRY/tfl-batch:latest .  && docker push $REGISTRY/tfl-batch:latest
 
-# 4. Stream into S3 bronze with the consumer role
-AWS_PROFILE=tfl-consumer LAKE_URI=s3://<bucket-name> python -m tfl_pipeline.consumer
-
-# 5. Run the Spark jobs on S3 with the Spark role
-export AWS_PROFILE=tfl-spark-process
-python -m tfl_pipeline.jobs.silver.arrivals --dt 2026-10-21 --lake s3a://<bucket-name>
-# ...and the other four jobs, silver before gold
-
-# ...or let Airflow run the whole DAG on S3 (set the same variables for airflow standalone)
-export TFL_LAKE=s3a://<bucket-name>
-airflow dags test tfl_daily 2026-10-21
-
-# 6. Dashboard on Athena with the read-only user (its access key is created once, outside Terraform)
+# 5. Keys for the two users that need one, created outside Terraform
+aws iam create-access-key --user-name "$(terraform -chdir=infra output -raw github_deploy_user_name)"
+#    -> GitHub repository secrets AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
 aws iam create-access-key --user-name "$(terraform -chdir=infra output -raw dashboard_user_name)"
-aws configure --profile tfl-dashboard      # paste the key; region eu-north-1
-AWS_PROFILE=tfl-dashboard DASHBOARD_SOURCE=athena streamlit run dashboard/app.py
+#    -> Streamlit Cloud secrets (with DASHBOARD_SOURCE = "athena", AWS_DEFAULT_REGION)
+
+# 6. Check on the stream instance, without SSH
+aws ssm start-session --target "$(terraform -chdir=infra output -raw stream_instance_id)"
 ```
 
-To deploy it, point Streamlit Community Cloud at `dashboard/app.py` on `main` and add
-`DASHBOARD_SOURCE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_DEFAULT_REGION` as
-top-level secrets. It installs only `dashboard/requirements.txt`, not the whole pipeline.
+The stream instance installs Docker and starts collecting on first boot; the batch instance
+runs a first batch for yesterday as a test and switches itself off. Bronze files appear in
+S3 every 5 minutes, and from the next night the dashboard gets a new day every morning.
 
-`LAKE_URI` (consumer) accepts `s3://bucket[/prefix]` or a local path; Spark jobs use `s3a://`
-for S3. The first Spark run downloads the S3A connector (`hadoop-aws`, matching PySpark's
-bundled Hadoop), about 675 MB, cached afterwards.
+For the dashboard, point Streamlit Community Cloud at `dashboard/app.py` on `main` and add the
+key, `DASHBOARD_SOURCE` and `AWS_DEFAULT_REGION` as top-level secrets. It installs only
+`dashboard/requirements.txt`, not the whole pipeline.
 
 ## Testing and CI
 
 ```bash
 ruff check .            # lint
 ruff format --check .   # formatting
-pytest -v               # 19 unit tests, including Spark transformations
+pytest -v               # 22 unit tests, including Spark transformations
 
 pytest tests/test_dags.py -v   # in the Airflow virtualenv: DAG structure tests
 
-cd infra
-terraform fmt -check -recursive   # Terraform formatting
-terraform validate                # Terraform syntax and references
+terraform -chdir=infra fmt -check -recursive   # Terraform formatting
+terraform -chdir=infra validate                # Terraform syntax and references
 ```
 
-GitHub Actions runs three jobs on every pull request and on every push to `main`: `test`
-(Python 3.12 + Java 21, ruff and pytest), `dags` (Airflow 3.3.2 with its constraints, DAG
-structure tests) and `terraform` (fmt + validate, with no AWS access). Branch protection blocks
-merging until they pass.
+GitHub Actions runs `test` (Python 3.12 + Java 21, ruff and pytest), `dags` (Airflow 3.3.2 with
+its constraints, DAG structure tests) and `terraform` (fmt + validate, with no AWS access) on
+every pull request and every push to `main`; branch protection blocks merging until they pass.
+After a merge, `deploy` builds, pushes and deploys (see
+[Continuous deployment](#continuous-deployment)).
 
 The DAG tests load `dags/` and check that it imports without errors, has the expected tasks and
 dependencies, passes `{{ ds }}` to every job, retries jobs but not checks, and keeps the
@@ -461,8 +537,10 @@ concurrency limits. They skip themselves where Airflow isn't installed.
 The Spark tests build tiny DataFrames with explicit schemas and check the rules that matter,
 for example: placeholder vehicle IDs become NULL without dropping rows, exact replays are
 removed while DLR trains sharing an ID are kept, one train seen in two polls counts as one
-arrival, and collection gaps are excluded from headways. They need neither Kafka, the TfL API
-nor AWS.
+arrival, trains reported seconds apart count as one, collection gaps are excluded from
+headways, and coverage has a row for every hour, including hours with no data. The `run_day`
+tests check the order of the steps, that a missing day is skipped and that a failure stops the
+run. None of them need Kafka, the TfL API or AWS.
 
 ## Project structure
 
@@ -478,22 +556,33 @@ src/tfl_pipeline/
     common.py          Spark session (UTC, dynamic overwrite, S3A) and read/write helpers
     silver/            arrivals.py, line_status.py
     gold/              arrival_events.py (shared rules), line_status_daily.py,
-                       station_hourly.py, line_headways.py
+                       station_hourly.py, line_headways.py, collection_coverage.py
     bronze_exists.py   "is there data for this day?" (exit 99 = skip the run)
     quality.py         data quality checks for one day of silver and gold
     run_day.py         the whole daily batch in DAG order, without Airflow
 dags/                  Airflow DAG: tfl_daily.py
 dashboard/             Streamlit app: app.py (page), charts.py (Altair charts),
                        data.py (local or Athena), requirements.txt (for Streamlit Cloud)
-infra/                 Terraform: S3 bucket, IAM roles (main.tf, iam.tf),
-                       Glue tables and Athena workgroup (athena.tf),
-                       read-only dashboard user (dashboard.tf)
+infra/                 Terraform:
+  main.tf, iam.tf        S3 bucket, consumer and Spark roles
+  athena.tf              Glue tables and Athena workgroup
+  dashboard.tf           read-only dashboard user
+  ecr.tf                 image repositories
+  instances_iam.tf       instance roles and profiles
+  stream_instance.tf     24/7 stream instance
+  batch_instance.tf      nightly batch instance
+  scheduler.tf           EventBridge schedule that starts the batch
+  monitoring.tf          CloudWatch logs, metric filters, alarms, SNS
+  budget.tf              project budget and automatic stop
+  github_deploy.tf       deploy-only user for GitHub Actions
+  templates/             start-up scripts for the two instances
 sql/                   example Athena queries on the gold tables
 tests/                 unit tests (conftest.py holds the shared Spark fixtures)
 docs/                  data exploration notes, dashboard screenshots (images/)
-conf/                  log4j2.properties for quieter local Spark logs
+conf/                  log4j2.properties for quieter Spark logs
 Dockerfile             two images: stream (producer, consumer) and batch (Spark jobs)
-docker-compose.yml     Kafka, Kafka UI, producer and consumer
+docker-compose.yml     local stack: Kafka, Kafka UI, producer and consumer
+.github/workflows/     CI (lint, tests, DAG tests, Terraform checks) and CD (deploy)
 ```
 
 ## Roadmap
@@ -507,4 +596,5 @@ docker-compose.yml     Kafka, Kafka UI, producer and consumer
 | 4 | Glue Data Catalog and Athena: all tables queryable with SQL, partition projection | ✅ Done |
 | 5 | Airflow orchestration: daily DAG, data quality checks, skip on missing data, backfills, DAG tests in CI | ✅ Done |
 | 6 | Streamlit dashboard on Athena, deployed publicly with a read-only IAM user | ✅ Done |
-| 7 | Docker images ✅, 24/7 deployment on EC2, CD | ⏳ In progress |
+| 7 | Production on AWS: Docker images, 24/7 stream on EC2, nightly scheduled batch, monitoring and alarms, cost cap, continuous deployment | ✅ Done |
+| 8 | Results from the 24/7 run (days collected, coverage, events per day, actual cost); prediction-accuracy analysis | ⏳ Next |
