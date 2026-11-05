@@ -66,6 +66,14 @@ locals {
         max_headway_min    = "double"
       }
     }
+    gold_collection_coverage = {
+      path = "gold/collection_coverage"
+      columns = {
+        hour         = "int"
+        polls        = "bigint"
+        coverage_pct = "double"
+      }
+    }
     silver_arrivals = {
       path = "silver/arrivals"
       columns = {

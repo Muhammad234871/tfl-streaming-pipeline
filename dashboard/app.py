@@ -28,12 +28,14 @@ dt = st.selectbox("Day (UTC)", days())
 stations = load("station_hourly", dt)
 status = load("line_status_daily", dt)
 headways = load("line_headways", dt)
+coverage = load("collection_coverage", dt)
 
 # --- KPI tiles ---------------------------------------------------------------
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 c1.metric("Train arrivals", f"{stations['train_arrivals'].sum():,}")
 c2.metric("Stations", f"{stations['naptan_id'].nunique():,}")
-
+hours_collected = coverage["polls"].sum() / 60
+c4.metric("Data collected", f"{hours_collected:.1f} of 24 h")
 # --- Disruptions -------------------------------------------------------------
 st.subheader("Time spent in a non-good status, by line")
 
@@ -53,8 +55,14 @@ else:
 
 # --- Arrivals per hour -------------------------------------------------------
 st.subheader("Train arrivals per hour, whole network")
-by_hour = stations.groupby("hour")["train_arrivals"].sum().reset_index()
-st.altair_chart(charts.arrivals_by_hour(by_hour), width="stretch")
+by_hour = stations.groupby("hour", as_index=False)["train_arrivals"].sum()
+hourly = coverage[["hour", "coverage_pct"]].merge(by_hour, on="hour", how="left")
+hourly = hourly.fillna({"train_arrivals": 0})
+st.caption(
+    "Grey bands mark hours we didn't fully collect (the producer wasn't running), "
+    "so low bars there mean missing data, not fewer trains."
+)
+st.altair_chart(charts.arrivals_by_hour(hourly), width="stretch")
 
 left, right = st.columns(2)
 

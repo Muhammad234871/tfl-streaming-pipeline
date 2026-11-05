@@ -35,26 +35,62 @@ def _bar_ends(horizontal: bool) -> dict:
     return {"cornerRadiusEnd": 4, "orient": "horizontal" if horizontal else "vertical"}
 
 
-def arrivals_by_hour(df: pd.DataFrame) -> alt.Chart:
-    """Columns: hour (0-23, UTC), train_arrivals."""
-    return (
-        alt.Chart(df)
-        .mark_bar(color=BLUE, **_bar_ends(horizontal=False))
-        .encode(
-            x=alt.X(
-                "hour:O",
-                title="Hour (UTC)",
-                scale=alt.Scale(domain=list(range(24))),
-                axis=alt.Axis(labelAngle=0),
-            ),
-            y=alt.Y("train_arrivals:Q", title="Train arrivals"),
-            tooltip=[
-                alt.Tooltip("hour:O", title="Hour"),
-                alt.Tooltip("train_arrivals:Q", title="Arrivals", format=","),
-            ],
+COMPLETE_HOUR_PCT = 90  # an hour with at least 90% of its polls counts as complete
+PARTIAL_BLUE = "#9ec5f4"  # lighter step of BLUE for hours with gaps
+GAP_GREY = "#8a8984"
+
+
+def arrivals_by_hour(df: pd.DataFrame) -> alt.LayerChart:
+    """Columns: hour (0-23, UTC), train_arrivals, coverage_pct (from collection_coverage).
+
+    Hours we didn't fully collect get a grey band and a lighter bar, so a gap in the data
+    isn't read as "no trains".
+    """
+    complete = f"Complete hour (≥{COMPLETE_HOUR_PCT}% collected)"
+    partial = "Partly collected"
+    df = df.assign(
+        collection=df["coverage_pct"].map(
+            lambda pct: complete if pct >= COMPLETE_HOUR_PCT else partial
         )
-        .properties(height=280)
     )
+    x = alt.X(
+        "hour:O",
+        title="Hour (UTC)",
+        scale=alt.Scale(domain=list(range(24))),
+        axis=alt.Axis(labelAngle=0),
+    )
+    tooltip = [
+        alt.Tooltip("hour:O", title="Hour"),
+        alt.Tooltip("train_arrivals:Q", title="Arrivals", format=","),
+        alt.Tooltip("coverage_pct:Q", title="Collected (%)", format=".0f"),
+    ]
+
+    gaps = (
+        alt.Chart(df[df["coverage_pct"] < COMPLETE_HOUR_PCT])
+        .mark_rect(color=GAP_GREY, opacity=0.18)
+        # From 0 to the top of the tallest bar, on the same y scale as the bars.
+        .encode(
+            x=x,
+            y=alt.datum(0),
+            y2=alt.datum(max(df["train_arrivals"].max(), 1)),
+            tooltip=tooltip,
+        )
+    )
+    bars = (
+        alt.Chart(df)
+        .mark_bar(**_bar_ends(horizontal=False))
+        .encode(
+            x=x,
+            y=alt.Y("train_arrivals:Q", title="Train arrivals"),
+            color=alt.Color(
+                "collection:N",
+                scale=alt.Scale(domain=[complete, partial], range=[BLUE, PARTIAL_BLUE]),
+                legend=alt.Legend(title=None, orient="top", labelLimit=0),
+            ),
+            tooltip=tooltip,
+        )
+    )
+    return alt.layer(gaps, bars).properties(height=280)
 
 
 def busiest_stations(df: pd.DataFrame) -> alt.Chart:
