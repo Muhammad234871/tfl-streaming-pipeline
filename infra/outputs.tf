@@ -30,3 +30,15 @@ output "dashboard_user_name" {
   description = "IAM user for the deployed dashboard; create its access key with the CLI"
   value       = aws_iam_user.dashboard.name
 }
+
+
+output "ecr_repository_urls" {
+  description = "Where to push the images"
+  value       = { for name, repo in aws_ecr_repository.images : name => repo.repository_url }
+}
+
+
+output "stream_instance_id" {
+  description = "Open a shell with: aws ssm start-session --target <id>"
+  value       = aws_instance.stream.id
+}
