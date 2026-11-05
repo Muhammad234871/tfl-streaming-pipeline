@@ -78,3 +78,93 @@ jobs:
       - name: Validate
         run: terraform validate
 
+  # Continuous deployment: after every merge to main (and only if all checks passed),
+  # build both images, push them to ECR, and redeploy the stream instance.
+  # The batch instance needs no deploy step: it pulls :latest on every nightly run.
+  deploy:
+    needs: [test, dags, terraform]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: deploy # one deploy at a time; a newer merge waits instead of overlapping
+      cancel-in-progress: false
+    env:
+      AWS_REGION: eu-north-1
+      REGISTRY: 902398684545.dkr.ecr.eu-north-1.amazonaws.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: AWS credentials (deploy-only IAM user)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Tagged with the commit hash (to know what runs, and to roll back) and latest
+      # (what the instances pull). provenance: false keeps a plain image that ECR scans.
+      - name: Build and push the stream image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: stream
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.REGISTRY }}/tfl-stream:latest
+            ${{ env.REGISTRY }}/tfl-stream:${{ github.sha }}
+          cache-from: type=gha,scope=stream
+          cache-to: type=gha,mode=max,scope=stream
+
+      - name: Build and push the batch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: batch
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.REGISTRY }}/tfl-batch:latest
+            ${{ env.REGISTRY }}/tfl-batch:${{ github.sha }}
+          cache-from: type=gha,scope=batch
+          cache-to: type=gha,mode=max,scope=batch
+
+      # Pull the new image on the stream instance and restart only what changed.
+      # The consumer flushes its buffer on SIGTERM and Kafka holds new messages meanwhile.
+      - name: Redeploy the stream instance
+        run: |
+          ID=$(aws ec2 describe-instances \
+            --filters Name=tag:Name,Values=tfl-stream Name=instance-state-name,Values=running \
+            --query 'Reservations[0].Instances[0].InstanceId' --output text)
+          echo "stream instance: $ID"
+
+          cat > deploy.json <<JSON
+          {"commands": [
+            "aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $REGISTRY",
+            "cd /opt/tfl && docker compose pull producer consumer && docker compose up -d",
+            "docker image prune -f",
+            "docker compose -f /opt/tfl/docker-compose.yml ps"
+          ]}
+          JSON
+
+          CMD=$(aws ssm send-command --instance-ids "$ID" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy ${GITHUB_SHA::7}" \
+            --parameters file://deploy.json \
+            --query Command.CommandId --output text)
+
+          # Wait for the command, then show its output; fail the job if it failed.
+          aws ssm wait command-executed --command-id "$CMD" --instance-id "$ID" || true
+          aws ssm get-command-invocation --command-id "$CMD" --instance-id "$ID" \
+            --query '[Status, StandardOutputContent, StandardErrorContent]' --output text
+          STATUS=$(aws ssm get-command-invocation --command-id "$CMD" --instance-id "$ID" \
+            --query Status --output text)
+          test "$STATUS" = "Success"
+
