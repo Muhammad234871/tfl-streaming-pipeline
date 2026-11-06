@@ -23,6 +23,24 @@ backfills. All AWS infrastructure is provisioned by **Terraform**.
 Gzip compression reduces the raw JSON about **17×** on disk; for one day, 43 MB of bronze
 becomes 18.6 MiB of silver Parquet and a few kilobytes of gold.
 
+## Results: the first automated day (5 November 2026)
+
+5 November is the first day collected on EC2 and processed by the nightly batch without any
+manual step: the batch instance was started at 01:00 UTC on 6 November, processed the day,
+shut itself down, and the dashboard showed it the same morning, with no alarm overnight.
+
+| Measure | Result |
+|---|---|
+| Data collected | **14.7 of 24 hours** (884 polls): from 09:10 UTC, when collection started, every hour from 10:00 to 23:00 was complete |
+| Train arrivals | **167,009** at **463** stations |
+| Busiest stations | King's Cross St. Pancras **2,392** arrivals, Whitechapel 2,067, Waterloo 1,813 |
+| Busiest hour | **18:00 UTC: 12,624 arrivals**, the evening peak (17:00: 12,504) |
+| Most frequent service | **Victoria line**, a median of **2.5 minutes** between trains; Jubilee and Northern about 3 |
+| Disruptions | **10 lines**; the Suffragette line was part-closed for all 884 observed minutes, the Central line had minor delays for 611 minutes and the District line for 548 |
+
+The hours before 09:10 are greyed out on the dashboard as "not collected", so the missing
+morning isn't mistaken for a quiet network. Results will be extended as more days are collected.
+
 ## Architecture
 
 ```mermaid
@@ -279,8 +297,8 @@ was collected that day, **red** = a real problem to investigate.
 
 **Live:** [tfl-london-network.streamlit.app](https://tfl-london-network.streamlit.app/), hosted on Streamlit Community Cloud ([`dashboard/app.py`](dashboard/app.py)).
 
-![Dashboard overview: KPI tiles and minutes in a non-good status per line](docs/images/dashboard-overview.png)
-![Dashboard detail: train arrivals per hour with coverage, busiest stations, time between trains](docs/images/dashboard-detail.png)
+![Dashboard for 5 November: KPI tiles and minutes in a non-good status per line](docs/images/dashboard-overview.png)
+![Dashboard for 5 November: train arrivals per hour with uncollected hours greyed out, busiest stations, time between trains](docs/images/dashboard-detail.png)
 
 Pick a day and the page shows that day's gold data:
 
@@ -597,4 +615,4 @@ docker-compose.yml     local stack: Kafka, Kafka UI, producer and consumer
 | 5 | Airflow orchestration: daily DAG, data quality checks, skip on missing data, backfills, DAG tests in CI | ✅ Done |
 | 6 | Streamlit dashboard on Athena, deployed publicly with a read-only IAM user | ✅ Done |
 | 7 | Production on AWS: Docker images, 24/7 stream on EC2, nightly scheduled batch, monitoring and alarms, cost cap, continuous deployment | ✅ Done |
-| 8 | Results from the 24/7 run (days collected, coverage, events per day, actual cost); prediction-accuracy analysis | ⏳ Next |
+| 8 | Results from the 24/7 run: first automated day ✅; next, several weeks of days, average coverage, actual cost, and a prediction-accuracy analysis | ⏳ In progress |
