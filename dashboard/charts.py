@@ -123,7 +123,9 @@ def disruption_minutes(df: pd.DataFrame) -> alt.Chart:
         alt.Chart(df)
         .mark_bar()
         .encode(
-            y=alt.Y("line_name:N", sort="-x", title=None),
+            y=alt.Y(
+                "line_name:N", sort="-x", title=None, axis=alt.Axis(labelLimit=200)
+            ),
             x=alt.X("sum(status_minutes):Q", title="Minutes in this status"),
             color=alt.Color(
                 "level:N",
