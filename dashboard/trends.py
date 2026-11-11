@@ -7,12 +7,13 @@ import streamlit as st
 
 import charts
 import notes
-from data import available_days, read_gold_range
+from data import available_days, read_gold_range, short_station_name
 
 MAX_DAYS = 31  # keeps the Athena queries small
 DEFAULT_DAYS = 10
 MIN_TRAINS = 5  # same rules as the One day page
 MIN_PLATFORM_HOURS = 10
+FREQUENT_MIN = 10  # "frequent service": a train at least every 10 minutes
 DEFAULT_LINES = ["Victoria", "Central", "Northern", "Elizabeth line"]
 
 
@@ -143,6 +144,60 @@ if profile.empty:
     st.info("No fully collected hours in these days.")
 else:
     st.altair_chart(charts.hourly_profile(profile), width="stretch")
+
+# --- Reliability league table ----------------------------------------------------------
+st.subheader("Most reliable lines")
+st.caption(
+    "Share of the time we observed each line that it had no disruption, over all the "
+    "days picked. Overnight closures count as fine."
+)
+# Two statuses at once can add up to more than the observed minutes: cap per day.
+capped = disruption.assign(
+    bad=disruption[["status_minutes", "observed_minutes"]].min(axis=1)
+)
+league = capped.groupby("line_name", as_index=False)[["bad", "observed_minutes"]].sum()
+league["good_pct"] = 100 - league["bad"] / league["observed_minutes"] * 100
+st.altair_chart(charts.reliability(league), width="stretch")
+
+# --- Longest waits ---------------------------------------------------------------------
+st.subheader("Longest waits on frequent services")
+st.caption(
+    f"Platform-hours where trains usually come every {FREQUENT_MIN} minutes or less, "
+    "ranked by how much longer the worst gap was than usual. Only fully collected "
+    "hours, so a gap in our data isn't mistaken for a wait. A long gap can also be a "
+    "train TfL stopped predicting, so treat these as leads, not proof."
+)
+line_lookup = observed[["line_id", "line_name"]].drop_duplicates("line_id")
+complete_hours = coverage.loc[
+    coverage["coverage_pct"] >= charts.COMPLETE_HOUR_PCT, ["day", "hour"]
+]
+waits = headways[
+    (headways["trains"] >= MIN_TRAINS)
+    & (headways["median_headway_min"] <= FREQUENT_MIN)
+].merge(complete_hours, on=["day", "hour"])
+waits = (
+    waits.assign(extra=waits["max_headway_min"] - waits["median_headway_min"])
+    .nlargest(10, "extra")
+    .merge(line_lookup, on="line_id", how="left")
+)
+if waits.empty:
+    st.info("No fully collected hours in these days.")
+else:
+    st.dataframe(
+        pd.DataFrame(
+            {
+                "When": waits["day"].dt.strftime("%a %d %b ")
+                + waits["hour"].map("{:02d}:00".format),
+                "Line": waits["line_name"].fillna(waits["line_id"]),
+                "Station": short_station_name(waits["station_name"]),
+                "Platform": waits["platform_name"],
+                "Longest gap (min)": waits["max_headway_min"],
+                "Usual gap (min)": waits["median_headway_min"],
+            }
+        ),
+        hide_index=True,
+        width="stretch",
+    )
 
 # --- Compare lines -------------------------------------------------------------------
 st.subheader("Compare lines")

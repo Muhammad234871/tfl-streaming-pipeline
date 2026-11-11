@@ -22,6 +22,13 @@ line's figure is the median over all platform-hours with at least 5 trains.
 "Good Service" and "Closed for the night" aren't counted as disruption. The share
 disrupted is the disrupted minutes divided by the minutes we observed that line.
 
+**Disruption timeline.** Consecutive minutes with the same status are joined into one
+stretch with a start and an end. Up to two missed polls don't break a stretch; a longer gap
+in our collection does, because we don't know the status while we weren't collecting.
+
+**Reliability.** The share of the minutes we observed a line when it had no disruption,
+over the days picked.
+
 **Collected hours.** The producer should make 60 polls an hour. An hour with at least 90%
 of them counts as complete; anything less is marked as partly collected.
 """
@@ -54,3 +61,8 @@ def method_and_caveats() -> None:
         st.markdown(METHOD)
     with st.expander("Caveats"):
         st.markdown(CAVEATS)
+    st.caption(
+        "Powered by TfL Open Data. Contains OS data © Crown copyright and database "
+        "rights 2016, and Geomni UK Map data © and database rights [2019]. · "
+        "[Code on GitHub](https://github.com/Muhammad234871/tfl-streaming-pipeline)"
+    )

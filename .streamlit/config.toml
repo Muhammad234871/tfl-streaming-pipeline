@@ -1,0 +1,4 @@
+# Dashboard theme. Only the accent colour is set, so light and dark mode both still work.
+# Run the dashboard from the repository root (streamlit run dashboard/app.py) so this is used.
+[theme]
+primaryColor = "#2a78d6"

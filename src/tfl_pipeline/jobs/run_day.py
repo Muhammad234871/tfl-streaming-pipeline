@@ -18,6 +18,7 @@ STEPS = [
     "silver.arrivals",
     "silver.line_status",
     "gold.line_status_daily",
+    "gold.line_status_intervals",
     "gold.station_hourly",
     "gold.line_headways",
     "gold.collection_coverage",
