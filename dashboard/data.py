@@ -38,6 +38,18 @@ def read_gold(table: str, dt: str) -> pd.DataFrame:
         raise ValueError(f"Unknown DASHBOARD_SOURCE={SOURCE!r}")
 
 
+def read_gold_range(table: str, start: str, end: str) -> pd.DataFrame:
+    """All days of a gold table from start to end, both included, e.g. "2026-11-06"."""
+    if table not in GOLD_TABLES:
+        raise ValueError(f"Unknown table {table!r}, must be one of {GOLD_TABLES}")
+    if SOURCE == "local":
+        return _read_gold_range_local(table, start, end)
+    elif SOURCE == "athena":
+        return _read_gold_range_athena(table, start, end)
+    else:
+        raise ValueError(f"Unknown DASHBOARD_SOURCE={SOURCE!r}")
+
+
 def available_days(table: str = "line_status_daily") -> list[str]:
     """The days that have gold data, newest first."""
     if table not in GOLD_TABLES:
@@ -58,6 +70,14 @@ def _read_gold_local(table: str, dt: str) -> pd.DataFrame:
     return pd.read_parquet(
         f"{LAKE}/gold/{table}",
         filters=[("dt", "==", dt)],
+    )
+
+
+def _read_gold_range_local(table: str, start: str, end: str) -> pd.DataFrame:
+    """Days start..end of a gold table. dt is a YYYY-MM-DD string, so text order is date order."""
+    return pd.read_parquet(
+        f"{LAKE}/gold/{table}",
+        filters=[("dt", ">=", start), ("dt", "<=", end)],
     )
 
 
@@ -92,6 +112,16 @@ def _read_gold_athena(table: str, dt: str) -> pd.DataFrame:
         WHERE dt =:dt
     """
     return _athena(sql, params={"dt": dt})
+
+
+def _read_gold_range_athena(table: str, start: str, end: str) -> pd.DataFrame:
+    """Days start..end of a gold table. dt is the partition, so Athena scans only those days."""
+    sql = f"""
+        SELECT *
+        FROM {ATHENA_DATABASE}.gold_{table}
+        WHERE dt BETWEEN :start AND :end
+    """
+    return _athena(sql, params={"start": start, "end": end})
 
 
 def _available_days_athena(table: str) -> list[str]:

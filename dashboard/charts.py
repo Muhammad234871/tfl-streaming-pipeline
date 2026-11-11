@@ -163,3 +163,116 @@ def headways_by_line(df: pd.DataFrame) -> alt.Chart:
         )
         .properties(height=alt.Step(24))
     )
+
+
+# --- Trends page (several days) ------------------------------------------------------
+
+# TfL's own line colours, so a line keeps one colour whatever else is selected. Two are
+# adjusted to read on both light and dark backgrounds: Northern (black on the map) and
+# Circle (pale yellow).
+LINE_COLOURS = {
+    "Bakerloo": "#b36305",
+    "Central": "#e32017",
+    "Circle": "#e1b800",
+    "District": "#00782a",
+    "Hammersmith & City": "#f3a9bb",
+    "Jubilee": "#a0a5a9",
+    "Metropolitan": "#9b0056",
+    "Northern": "#7a7a7a",
+    "Piccadilly": "#003688",
+    "Victoria": "#0098d4",
+    "Waterloo & City": "#95cdba",
+    "Elizabeth line": "#6950a1",
+    "DLR": "#00a4a7",
+    "Liberty": "#61686b",
+    "Lioness": "#faa61a",
+    "Mildmay": "#0077ad",
+    "Suffragette": "#5bbd72",
+    "Weaver": "#823a62",
+    "Windrush": "#ed1b00",
+}
+DAY_AXIS = alt.Axis(format="%a %d %b", labelAngle=0, tickCount="day")
+
+
+def arrivals_by_day(df: pd.DataFrame) -> alt.Chart:
+    """Columns: day (datetime), train_arrivals, coverage_pct (share of the day's minutes polled)."""
+    complete = f"Complete day (≥{COMPLETE_HOUR_PCT}% collected)"
+    partial = "Partly collected"
+    df = df.assign(
+        collection=df["coverage_pct"].map(
+            lambda pct: complete if pct >= COMPLETE_HOUR_PCT else partial
+        )
+    )
+    return (
+        alt.Chart(df)
+        .mark_bar(**_bar_ends(horizontal=False))
+        .encode(
+            x=alt.X(
+                "yearmonthdate(day):O",
+                title=None,
+                axis=alt.Axis(format="%a %d %b", labelAngle=0),
+            ),
+            y=alt.Y("train_arrivals:Q", title="Train arrivals"),
+            color=alt.Color(
+                "collection:N",
+                scale=alt.Scale(domain=[complete, partial], range=[BLUE, PARTIAL_BLUE]),
+                legend=alt.Legend(title=None, orient="top", labelLimit=0),
+            ),
+            tooltip=[
+                alt.Tooltip("day:T", title="Day", format="%a %d %b"),
+                alt.Tooltip("train_arrivals:Q", title="Arrivals", format=","),
+                alt.Tooltip("coverage_pct:Q", title="Collected (%)", format=".0f"),
+            ],
+        )
+        .properties(height=260)
+    )
+
+
+def hourly_profile(df: pd.DataFrame) -> alt.Chart:
+    """Columns: hour (0-23), day_type ("Weekday"/"Weekend"), avg_arrivals."""
+    base = alt.Chart(df).encode(
+        x=alt.X(
+            "hour:O",
+            title="Hour (UTC)",
+            scale=alt.Scale(domain=list(range(24))),
+            axis=alt.Axis(labelAngle=0),
+        ),
+        y=alt.Y("avg_arrivals:Q", title="Average train arrivals"),
+        color=alt.Color(
+            "day_type:N",
+            scale=alt.Scale(domain=["Weekday", "Weekend"], range=[BLUE, "#ec835a"]),
+            legend=alt.Legend(title=None, orient="top"),
+        ),
+        tooltip=[
+            alt.Tooltip("day_type:N", title="Days"),
+            alt.Tooltip("hour:O", title="Hour"),
+            alt.Tooltip("avg_arrivals:Q", title="Average arrivals", format=",.0f"),
+        ],
+    )
+    return (
+        base.mark_line(strokeWidth=2) + base.mark_point(filled=True, size=40)
+    ).properties(height=260)
+
+
+def line_trend(df: pd.DataFrame, value: str, title: str, fmt: str) -> alt.Chart:
+    """One line per rail line over days. Columns: day (datetime), line_name, <value>."""
+    names = sorted(df["line_name"].unique())
+    base = alt.Chart(df).encode(
+        x=alt.X("day:T", title=None, axis=DAY_AXIS),
+        y=alt.Y(f"{value}:Q", title=title),
+        color=alt.Color(
+            "line_name:N",
+            scale=alt.Scale(
+                domain=names, range=[LINE_COLOURS.get(n, OTHER_LEVEL[1]) for n in names]
+            ),
+            legend=alt.Legend(title=None, orient="top", labelLimit=0),
+        ),
+        tooltip=[
+            alt.Tooltip("day:T", title="Day", format="%a %d %b"),
+            alt.Tooltip("line_name:N", title="Line"),
+            alt.Tooltip(f"{value}:Q", title=title, format=fmt),
+        ],
+    )
+    return (
+        base.mark_line(strokeWidth=2) + base.mark_point(filled=True, size=50)
+    ).properties(height=300)
