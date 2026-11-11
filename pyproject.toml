@@ -21,4 +21,4 @@ where = ["src"]
 testpaths = ["tests"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["tfl_pipeline", "charts", "data"]
+known-first-party = ["tfl_pipeline", "charts", "data", "notes"]
