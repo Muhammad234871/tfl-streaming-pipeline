@@ -20,6 +20,8 @@ GOLD_TABLES = {
     "line_status_daily",
     "line_headways",
     "collection_coverage",
+    "line_status_intervals",
+    "pipeline_health",
 }
 
 
@@ -60,6 +62,13 @@ def available_days(table: str = "line_status_daily") -> list[str]:
         return _available_days_athena(table)
     else:
         raise ValueError(f"Unknown DASHBOARD_SOURCE={SOURCE!r}")
+
+
+def short_station_name(names: pd.Series) -> pd.Series:
+    """ "Euston Underground Station" -> "Euston", so one place reads as one name."""
+    return names.str.removesuffix(" Underground Station").str.removesuffix(
+        " Rail Station"
+    )
 
 
 # --- Local Parquet files -------------------------------------------------------

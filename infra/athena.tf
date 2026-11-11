@@ -74,6 +74,30 @@ locals {
         coverage_pct = "double"
       }
     }
+    gold_line_status_intervals = {
+      path = "gold/line_status_intervals"
+      columns = {
+        line_id            = "string"
+        line_name          = "string"
+        mode               = "string"
+        status_severity    = "int"
+        status_description = "string"
+        start_ts           = "timestamp"
+        end_ts             = "timestamp"
+        polls              = "bigint"
+        reason             = "string"
+      }
+    }
+    gold_pipeline_health = {
+      path = "gold/pipeline_health"
+      columns = {
+        table_name = "string"
+        row_count  = "bigint"
+        status     = "string"
+        messages   = "string"
+        checked_at = "timestamp"
+      }
+    }
     silver_arrivals = {
       path = "silver/arrivals"
       columns = {

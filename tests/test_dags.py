@@ -28,6 +28,7 @@ def test_dag_has_expected_tasks(dag):
         "silver_line_status",
         "gold_collection_coverage",
         "gold_line_status_daily",
+        "gold_line_status_intervals",
         "gold_station_hourly",
         "gold_line_headways",
         "check_quality",
@@ -42,9 +43,13 @@ def test_dependencies(dag):
         "gold_line_headways",
         "gold_collection_coverage",
     }
-    assert downstream["silver_line_status"] == {"gold_line_status_daily"}
+    assert downstream["silver_line_status"] == {
+        "gold_line_status_daily",
+        "gold_line_status_intervals",
+    }
     assert dag.get_task("check_quality").upstream_task_ids == {
         "gold_line_status_daily",
+        "gold_line_status_intervals",
         "gold_station_hourly",
         "gold_line_headways",
         "gold_collection_coverage",
