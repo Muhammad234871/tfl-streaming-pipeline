@@ -6,9 +6,10 @@ A data pipeline for London transport, running 24/7 on AWS. It streams live train
 predictions and line disruptions for the Tube, DLR, Elizabeth line and Overground from the
 [TfL Unified API](https://api.tfl.gov.uk) through **Kafka** into an **S3 data lake**, then uses
 **PySpark** to turn the raw data into clean **silver** tables and analytics-ready **gold** tables
-(delay minutes per line, busiest stations, time between trains, data coverage). Every table is
-registered in the **AWS Glue Data Catalog** and can be queried with plain SQL in **Amazon
-Athena**, and a public **Streamlit** dashboard reads the gold tables through Athena.
+(delay minutes per line, a disruption timeline, busiest stations, time between trains, data
+coverage and data quality results). Every table is registered in the **AWS Glue Data Catalog**
+and can be queried with plain SQL in **Amazon Athena**, and a public five-page **Streamlit**
+dashboard reads the gold tables through Athena, including a page on the pipeline's own health.
 
 In production the stream runs in **Docker** on an always-on **EC2** instance, and a second
 instance is started every night by **EventBridge Scheduler**, runs the daily Spark batch and
@@ -92,9 +93,9 @@ flowchart LR
 | **Consumer** (`consumer.py`) | Reads both topics, buffers messages, and writes gzipped JSON Lines files to bronze, partitioned by ingestion hour |
 | **Sinks** (`sinks.py`) | Write files to the lake: an S3 bucket or a local folder, chosen by one setting (`LAKE_URI`) without changing the consumer |
 | **Spark jobs** (`jobs/silver/`, `jobs/gold/`) | Batch jobs, one day at a time: bronze → silver (clean, typed, deduplicated) → gold (aggregated answers) |
-| **Daily batch** (`jobs/run_day.py`, `dags/tfl_daily.py`) | Checks bronze exists, runs the six Spark jobs in dependency order and finishes with data quality checks: as one command on EC2, or as an Airflow DAG locally |
+| **Daily batch** (`jobs/run_day.py`, `dags/tfl_daily.py`) | Checks bronze exists, runs the seven Spark jobs in dependency order and finishes with data quality checks, whose results are saved to gold: as one command on EC2, or as an Airflow DAG locally |
 | **Catalog and SQL** (`infra/athena.tf`, `sql/`) | Glue database `tfl_lake` with all silver and gold tables (partition projection on `dt`), and an Athena workgroup with a 1 GB per-query scan limit |
-| **Dashboard** (`dashboard/`) | Streamlit app with Altair charts: disruptions by line, arrivals per hour with data coverage, busiest stations, service frequency. Reads local Parquet or Athena, chosen by one setting |
+| **Dashboard** (`dashboard/`) | Five-page Streamlit app with Altair and pydeck charts: one day, trends over a date range, one station, two days compared, and pipeline health, plus a live status strip. Reads local Parquet or Athena, chosen by one setting |
 | **Containers** (`Dockerfile`) | Two images from one Dockerfile: `stream` (producer and consumer) and `batch` (Java 21, PySpark and the S3 connector) |
 | **Production** (`infra/`) | Terraform for everything on AWS: S3, IAM, Glue, Athena, ECR, both EC2 instances, the nightly schedule, CloudWatch logs and alarms, SNS, and the cost budget |
 | **CI/CD** (`.github/workflows/ci.yml`) | Lint, unit tests, DAG tests and Terraform checks on every pull request; on merge to `main`, build and push both images and redeploy the stream |
@@ -132,6 +133,17 @@ about 7% of the rows. See [docs/data_exploration.md](docs/data_exploration.md).
 | `gold/station_hourly` | station × day × hour | `train_arrivals`, `line_count`, `lines` | Which stations are busiest, and when? |
 | `gold/line_headways` | line × station × platform × day × hour | `trains`, `avg_headway_min`, `median_headway_min`, `max_headway_min` | How often do trains really come, and where are the long gaps? |
 | `gold/collection_coverage` | day × hour (always 24 rows) | `polls`, `coverage_pct` | How much of each hour did the pipeline actually collect? |
+| `gold/line_status_intervals` | line × status × unbroken stretch | `start_ts`, `end_ts`, `polls`, `reason` | When exactly was each line disrupted, and what did TfL say? |
+| `gold/pipeline_health` | table × day | `row_count`, `status` (pass / warn / fail), `messages`, `checked_at` | Did every table get built, and did it pass its quality checks? |
+
+`line_status_intervals` turns the minute-by-minute status into time intervals with a
+**gaps-and-islands** pattern: a window function flags each poll that starts a new stretch (the
+previous poll of the same status is more than 3 minutes earlier), and a running total of those
+flags numbers the stretches. One missed poll doesn't split a stretch; a longer gap in
+collection does, because the status is unknown while nothing was collected.
+
+`pipeline_health` is written by the quality job itself, **before** it decides its exit code, so
+a day that fails its checks is recorded too, not just the days that succeed.
 
 ### Modelling rules and caveats
 
@@ -144,6 +156,7 @@ Gold tables rest on a few explicit modelling choices:
 | Sightings of the same train at the same platform closer than this are **one arrival** | 10 min | `jobs/gold/arrival_events.py` |
 | Two arrivals at one platform closer than this are **the same train reported twice** | 60 s | `jobs/gold/line_headways.py` |
 | Gaps longer than this are **gaps in data collection**, not in the service | 30 min | `jobs/gold/line_headways.py` |
+| Polls of one status further apart than this start a **new disruption interval** | 3 min | `jobs/gold/line_status_intervals.py` |
 
 - **Duplicate "ghost" trains.** The TfL feed sometimes lists several trains at one platform
   seconds apart (for example five Liberty line "trains" at Romford within 6 seconds). They
@@ -167,7 +180,8 @@ Gold tables rest on a few explicit modelling choices:
 - **Day boundary.** `dt` is the ingestion date while `hour` in the arrival tables comes from the
   predicted arrival time, so a few arrivals just after midnight appear in the previous day.
 - **Station names** are merged by removing suffixes like " Underground Station"; a proper fix
-  needs a NaPTAN station lookup table.
+  needs a NaPTAN station lookup table. The dashboard's map uses one for coordinates
+  (`dashboard/stations.csv`), but two Elizabeth line rail IDs have no entry in it.
 
 ## Query with SQL (Athena)
 
@@ -286,17 +300,19 @@ flowchart LR
     SA --> GH[gold_line_headways]
     SA --> GC[gold_collection_coverage]
     SL --> GL[gold_line_status_daily]
+    SL --> GI[gold_line_status_intervals]
     GS --> Q[check_quality]
     GH --> Q
     GC --> Q
     GL --> Q
+    GI --> Q
 ```
 
 | Task | What it does |
 |---|---|
 | `check_bronze` | Exits with code 99 if there is no bronze data for the day, which **skips** the whole run (a day with nothing collected is not an error) |
 | silver and gold tasks | The Spark jobs, in dependency order; retried twice, 5 minutes apart |
-| `check_quality` | Fails the run if any table is empty, keys are NULL, duplicates appear or metrics are out of range; known issues are logged as warnings. Not retried, as a data problem won't fix itself |
+| `check_quality` | Fails the run if any table is empty, keys are NULL, duplicates appear or metrics are out of range; known issues are logged as warnings. Saves the results to `gold/pipeline_health` for the dashboard. Not retried, as a data problem won't fix itself |
 
 So a run's colour means something: **green** = processed and checked, **skipped** = no data
 was collected that day, **red** = a real problem to investigate.
@@ -316,18 +332,53 @@ was collected that day, **red** = a real problem to investigate.
 
 **Live:** [tfl-london-network.streamlit.app](https://tfl-london-network.streamlit.app/), hosted on Streamlit Community Cloud ([`dashboard/app.py`](dashboard/app.py)).
 
-![Dashboard for Friday 6 November: KPI tiles and minutes in a non-good status per line](docs/images/dashboard-overview.png)
-![Dashboard for Friday 6 November: a complete day of train arrivals per hour with morning and evening peaks, busiest stations, time between trains](docs/images/dashboard-detail.png)
+**One day** (Tuesday 10 November): the live status of every line, KPI tiles compared with the
+same weekday a week earlier, minutes in a non-good status per line, and the disruption
+timeline built from `line_status_intervals`.
 
-Pick a day and the page shows that day's gold data:
+![One day page: live status strip, KPI tiles, minutes disrupted per line and the disruption timeline for Tuesday 10 November](docs/images/dashboard-overview.png)
 
-| Section | Gold table | What it answers |
+The same day continued: a complete day of arrivals per hour with the morning peak and the
+quiet hours after 01:00, the station map, busiest stations and time between trains.
+
+![One day page, continued: arrivals per hour, map of London with one dot per station, busiest stations and median minutes between trains by line](docs/images/dashboard-detail.png)
+
+**Trends** over its default range, the last 10 days (3 to 10 November): the reliability league table and the longest waits
+on frequent services.
+
+![Trends page: share of observed time without disruption per line, and a table of the longest gaps between trains on frequent services](docs/images/dashboard-trends.png)
+
+**Pipeline health**: the latest day built and checked, hours collected per day (every day from
+6 November is complete) and rows per table per day.
+
+![Pipeline health page: freshness tiles, hours collected per day and rows per table per day](docs/images/dashboard-health.png)
+
+The dashboard has five pages:
+
+| Page | What it shows | Gold tables |
 |---|---|---|
-| KPI tiles | all four | Train arrivals, stations served, lines with a disruption, hours of data collected |
-| Non-good status by line | `line_status_daily` | Which lines were disrupted, how badly and for how long (overnight closures left out) |
-| Arrivals per hour | `station_hourly` + `collection_coverage` | The shape of the day; hours not fully collected are greyed out |
-| Busiest stations | `station_hourly` | Most train arrivals; a station's Tube, rail and Elizabeth line entries are merged by name |
-| Time between trains | `line_headways` | Median minutes between trains per line (platform-hours with 5+ trains; lines with fewer than 10 such platform-hours are left out) |
+| **One day** | A **live status strip** for every line; KPI tiles compared with the same weekday a week earlier; minutes in a non-good status per line; a **disruption timeline** with TfL's reason on hover; arrivals per hour with collection gaps greyed out; a **map of London** with an hour slider; busiest stations; time between trains | all except `pipeline_health` |
+| **Trends** | Any range up to 31 days (last 10 by default): arrivals per day, a typical weekday vs weekend hour, a **reliability league table**, the longest waits on frequent services, and disruption and frequency over time for lines you pick | `station_hourly`, `line_status_daily`, `line_headways`, `collection_coverage` |
+| **Station** | One station on one day: arrivals per hour, its rank, its lines, its busiest platforms and the usual wait per line | `station_hourly`, `line_headways` |
+| **Compare days** | Two days side by side (by default the latest and the same weekday a week earlier): tiles with the change, arrivals per hour, disrupted minutes per line | `station_hourly`, `line_status_daily`, `collection_coverage` |
+| **Pipeline health** | Freshness of the latest day, hours collected per day, rows per table per day (each on its own scale, so a sudden drop stands out), and quality check results | `pipeline_health`, `collection_coverage` |
+
+Every page ends with a **Method** and a **Caveats** section that explain how each number is
+calculated and what it can't tell you.
+
+Rules the charts follow:
+
+- **A gap in collection is never shown as a quiet period.** Hours and days below 90% coverage
+  are greyed out, drawn lighter, or left out of averages and comparisons; "vs last week" is
+  only shown when both days were fully collected.
+- **Each line keeps its TfL colour** wherever it appears (Northern and Circle are adjusted so
+  they read on both light and dark backgrounds), and status always has a text label, not just
+  a colour.
+- **The live strip is the only part that doesn't come from the lake.** It calls the TfL status
+  API directly, at most once a minute (cached), and refreshes on its own. The pipeline's job is
+  history and analysis, which TfL doesn't keep; the current status, TfL already serves.
+- **Station coordinates** for the map come from TfL's StopPoint API, saved once to
+  `dashboard/stations.csv` by `dashboard/build_stations.py`, since stations rarely move.
 
 **How it gets data** ([`dashboard/data.py`](dashboard/data.py)):
 
@@ -369,8 +420,11 @@ Terraform state. It lives only in a local CLI profile and in Streamlit's secrets
 - **New days appear within 10 minutes** of the batch finishing, because the day list is cached.
 - **Cold start.** The free tier sleeps after a few days without visitors; the first visit
   wakes it in about a minute, and the first Athena queries take about 15 seconds.
-- **After changing `data.py` or `charts.py`**, reboot the app on Streamlit Cloud: a rerun can
+- **After changing any module in `dashboard/`**, reboot the app on Streamlit Cloud: a rerun can
   keep the previously imported modules.
+- **The live strip depends on TfL.** If the TfL API is down or slow, the strip shows a short
+  message and the rest of the dashboard still works.
+- **Times are UTC**, so in British Summer Time London is one hour ahead of the charts.
 
 ## Design decisions
 
@@ -553,7 +607,7 @@ key, `DASHBOARD_SOURCE` and `AWS_DEFAULT_REGION` as top-level secrets. It instal
 ```bash
 ruff check .            # lint
 ruff format --check .   # formatting
-pytest -v               # 22 unit tests, including Spark transformations
+pytest -v               # 31 unit tests, including Spark transformations
 
 pytest tests/test_dags.py -v   # in the Airflow virtualenv: DAG structure tests
 
@@ -575,7 +629,9 @@ The Spark tests build tiny DataFrames with explicit schemas and check the rules 
 for example: placeholder vehicle IDs become NULL without dropping rows, exact replays are
 removed while DLR trains sharing an ID are kept, one train seen in two polls counts as one
 arrival, trains reported seconds apart count as one, collection gaps are excluded from
-headways, and coverage has a row for every hour, including hours with no data. The `run_day`
+headways, coverage has a row for every hour, including hours with no data, consecutive status
+polls become one interval while a long gap splits it, and each quality message lands on its
+own table's pass/warn/fail result. The `run_day`
 tests check the order of the steps, that a missing day is skipped and that a failure stops the
 run. None of them need Kafka, the TfL API or AWS.
 
@@ -593,13 +649,22 @@ src/tfl_pipeline/
     common.py          Spark session (UTC, dynamic overwrite, S3A) and read/write helpers
     silver/            arrivals.py, line_status.py
     gold/              arrival_events.py (shared rules), line_status_daily.py,
-                       station_hourly.py, line_headways.py, collection_coverage.py
+                       line_status_intervals.py, station_hourly.py, line_headways.py,
+                       collection_coverage.py
     bronze_exists.py   "is there data for this day?" (exit 99 = skip the run)
-    quality.py         data quality checks for one day of silver and gold
+    quality.py         data quality checks for one day; saves results to gold/pipeline_health
     run_day.py         the whole daily batch in DAG order, without Airflow
 dags/                  Airflow DAG: tfl_daily.py
-dashboard/             Streamlit app: app.py (page), charts.py (Altair charts),
-                       data.py (local or Athena), requirements.txt (for Streamlit Cloud)
+dashboard/             Streamlit app:
+  app.py                 entry point and page list
+  one_day.py, trends.py, station.py, compare.py, health.py   the five pages
+  charts.py              Altair and pydeck charts
+  data.py                local Parquet or Athena
+  live.py                live status strip (TfL API)
+  notes.py               Method, Caveats and footer
+  stations.csv           station coordinates, built by build_stations.py
+  requirements.txt       for Streamlit Cloud
+.streamlit/config.toml dashboard theme
 infra/                 Terraform:
   main.tf, iam.tf        S3 bucket, consumer and Spark roles
   athena.tf              Glue tables and Athena workgroup
@@ -634,4 +699,5 @@ docker-compose.yml     local stack: Kafka, Kafka UI, producer and consumer
 | 5 | Airflow orchestration: daily DAG, data quality checks, skip on missing data, backfills, DAG tests in CI | ✅ Done |
 | 6 | Streamlit dashboard on Athena, deployed publicly with a read-only IAM user | ✅ Done |
 | 7 | Production on AWS: Docker images, 24/7 stream on EC2, nightly scheduled batch, monitoring and alarms, cost cap, continuous deployment | ✅ Done |
+| – | Dashboard v2: five pages, live status, map, disruption timeline, trends, station and day comparisons, pipeline health page backed by saved quality results | ✅ Done |
 | 8 | Results from the 24/7 run: first automated day ✅, first complete days with 99.7% coverage ✅; next, several weeks of data, weekday patterns, actual cost, and a prediction-accuracy analysis | ⏳ In progress |
